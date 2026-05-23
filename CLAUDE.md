@@ -1,26 +1,23 @@
 # Developer Protocol
 
-**Server:** wikidata-mcp-server
+**Server:** @cyanheads/wikidata-mcp-server
 **Version:** 0.1.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.7`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
 
+**Domain:** Wikidata knowledge graph — entity search/fetch (REST API v1), SPARQL queries (Wikidata Query Service), batch label resolution (MediaWiki `wbgetentities`), and external ID lookup (DOI, PMID, ORCID, OpenAlex, IMDb).
+
+**Tools (7):** `wikidata_search_entities`, `wikidata_get_entity`, `wikidata_get_labels`, `wikidata_get_statements`, `wikidata_get_sitelinks`, `wikidata_sparql_query`, `wikidata_resolve_external_id`
+
+**Resources (1):** `wikidata://entity/{id}` — compact markdown entity summary
+
+**Services:** `wikidata-rest-service` (REST API v1 + MediaWiki batch), `wikidata-sparql-service` (SPARQL with auto-prefix injection)
+
+**Config env vars:** `WIKIDATA_USER_AGENT`, `WIKIDATA_SPARQL_TIMEOUT_MS`, `WIKIDATA_REST_TIMEOUT_MS`
+
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
-
----
-
-## First Session
-
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. The framework, skills, and example definitions are in place — the domain isn't. The user's first messages will set direction; wait for them before proceeding.
-
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
-
-1. **Get your bearings.** Take stock of the project tree, the skills in `skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
 
 ---
 

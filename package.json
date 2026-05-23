@@ -1,12 +1,12 @@
 {
-  "name": "wikidata-mcp-server",
+  "name": "@cyanheads/wikidata-mcp-server",
   "version": "0.1.0",
-  "description": "",
+  "description": "MCP server for Wikidata — entity search and fetch, SPARQL queries, and external ID lookup.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "wikidata-mcp-server": "dist/index.js"
+    "@cyanheads/wikidata-mcp-server": "dist/index.js"
   },
   "files": [
     "changelog/",
@@ -37,10 +37,24 @@
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio node dist/index.js",
     "start:http": "MCP_TRANSPORT_TYPE=http node dist/index.js"
   },
-  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "ai",
+    "llm",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "wikidata",
+    "sparql",
+    "knowledge-graph",
+    "wikibase",
+    "linked-data"
+  ],
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/cyanheads/wikidata-mcp-server"
   },
   "license": "Apache-2.0",
   "engines": {
