@@ -82,8 +82,9 @@ export class WikidataSparqlService {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), effectiveTimeout);
 
-        // Merge caller signal with our timeout signal
-        ctx.signal.addEventListener('abort', () => controller.abort());
+        // Forward cancellation from the caller's signal to our timeout controller
+        const onCallerAbort = () => controller.abort();
+        ctx.signal.addEventListener('abort', onCallerAbort);
 
         try {
           const response = await fetch(SPARQL_ENDPOINT, {
@@ -139,6 +140,7 @@ export class WikidataSparqlService {
           throw err;
         } finally {
           clearTimeout(timeoutId);
+          ctx.signal.removeEventListener('abort', onCallerAbort);
         }
       },
       {

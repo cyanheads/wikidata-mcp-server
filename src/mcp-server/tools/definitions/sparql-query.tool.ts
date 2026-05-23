@@ -62,7 +62,10 @@ export const wikidataSparqlQuery = tool('wikidata_sparql_query', {
     rowCount: z.number().describe('Number of result rows.'),
     truncated: z
       .boolean()
-      .describe('Always false for SELECT queries — results are complete or the query times out.'),
+      .describe(
+        'True when the endpoint returned a partial result set due to server-side memory limits. ' +
+          'False when the full result was returned. Add a LIMIT clause to avoid truncation on large queries.',
+      ),
   }),
 
   errors: [

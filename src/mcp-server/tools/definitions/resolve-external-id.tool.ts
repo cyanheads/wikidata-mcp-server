@@ -34,7 +34,8 @@ export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
   title: 'Resolve Wikidata External ID',
   description:
     'Look up a Wikidata entity by an external identifier such as a DOI, PubMed ID, ORCID iD, or OpenAlex ID. ' +
-    'Returns the QID, label, description, and entity URL when a match is found, or null when no entity claims this identifier. ' +
+    'Returns match=<entity> on success, match=null when not found, and match=null with multipleMatches populated ' +
+    'when a Wikidata data integrity issue causes more than one entity to claim the same external ID. ' +
     'Common cross-server join use cases: CrossRef DOI → Wikidata paper QID (P356), ' +
     'PubMed PMID → Wikidata paper QID (P698), ORCID → author QID (P496), ' +
     'OpenAlex ID → entity QID (P10283). ' +
@@ -64,27 +65,22 @@ export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
 
   output: z.object({
     match: z
-      .union([
-        z
-          .object({
-            id: z.string().describe('Wikidata Q-ID of the matching entity (e.g., "Q12345").'),
-            label: z
-              .string()
-              .describe('Display label in the requested language, or empty string if unavailable.'),
-            description: z
-              .string()
-              .describe(
-                'Short description in the requested language, or empty string if unavailable.',
-              ),
-            url: z
-              .string()
-              .describe('Wikidata entity page URL (e.g., "https://www.wikidata.org/wiki/Q12345").'),
-          })
-          .describe('The Wikidata entity that claims this external identifier.'),
-        z.null().describe('No Wikidata entity found for this external identifier.'),
-      ])
+      .object({
+        id: z.string().describe('Wikidata Q-ID of the matching entity (e.g., "Q12345").'),
+        label: z
+          .string()
+          .describe('Display label in the requested language, or empty string if unavailable.'),
+        description: z
+          .string()
+          .describe('Short description in the requested language, or empty string if unavailable.'),
+        url: z
+          .string()
+          .describe('Wikidata entity page URL (e.g., "https://www.wikidata.org/wiki/Q12345").'),
+      })
+      .nullable()
       .describe(
-        'Matching entity, or null when no Wikidata entity claims this external identifier.',
+        'Matching entity, or null when no Wikidata entity claims this external identifier ' +
+          '(including the case where multipleMatches is populated).',
       ),
     property: z.string().describe('The P-ID used for the lookup.'),
     value: z
@@ -97,14 +93,14 @@ export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
         z
           .object({
             id: z.string().describe('Q-ID of a matching entity.'),
-            label: z.string().describe('Label of this match.'),
+            label: z.string().describe('Display label of this match.'),
           })
-          .describe('One of several entities that claim this external identifier.'),
+          .describe('One of the entities that claims this external identifier.'),
       )
       .optional()
       .describe(
-        'Present when more than one entity claims this external ID — a data integrity issue in Wikidata. ' +
-          'All matching QIDs are returned for disambiguation.',
+        'Present when more than one Wikidata entity claims this external ID (data integrity issue). ' +
+          'match is null when this field is present. Inspect the list and select the correct QID manually.',
       ),
   }),
 
@@ -114,13 +110,6 @@ export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
       code: JsonRpcErrorCode.InvalidParams,
       when: 'Property ID is not in P+digits format.',
       recovery: 'Supply a valid P-ID (P followed by digits, e.g. P356 for DOI).',
-    },
-    {
-      reason: 'multiple_matches',
-      code: JsonRpcErrorCode.InvalidParams,
-      when: 'More than one Wikidata entity claims this external ID — a data integrity issue.',
-      recovery:
-        'Inspect the multipleMatches field to see all matching QIDs and select the correct one manually.',
     },
   ],
 
@@ -157,11 +146,7 @@ LIMIT 5`;
     const bindings = response.results.bindings;
 
     if (bindings.length === 0) {
-      return {
-        match: null,
-        property: prop,
-        value: normalizedValue,
-      };
+      return { match: null, property: prop, value: normalizedValue };
     }
 
     // Extract QIDs
@@ -180,24 +165,24 @@ LIMIT 5`;
     });
 
     if (unique.length > 1) {
-      throw ctx.fail(
-        'multiple_matches',
-        `External ID ${prop}="${normalizedValue}" matches ${unique.length} entities in Wikidata.`,
-        {
-          multipleMatches: unique.map((m) => ({ id: m.id, label: m.label })),
-          ...ctx.recoveryFor('multiple_matches'),
-        },
-      );
+      // Wikidata data integrity issue — multiple entities claim the same external ID.
+      // Return all matches so the agent can pick the right one.
+      return {
+        match: null,
+        property: prop,
+        value: normalizedValue,
+        multipleMatches: unique.map((m) => ({ id: m.id, label: m.label })),
+      };
     }
 
     // unique.length === 1 guaranteed by the preceding check
-    const match = unique[0] as NonNullable<(typeof unique)[number]>;
+    const m = unique[0] as NonNullable<(typeof unique)[number]>;
     return {
       match: {
-        id: match.id,
-        label: match.label,
-        description: match.description,
-        url: `https://www.wikidata.org/wiki/${match.id}`,
+        id: m.id,
+        label: m.label,
+        description: m.description,
+        url: `https://www.wikidata.org/wiki/${m.id}`,
       },
       property: prop,
       value: normalizedValue,
@@ -209,22 +194,34 @@ LIMIT 5`;
       `**Property:** ${result.property} | **Value searched:** ${result.value}`,
     ];
 
-    if (result.match === null) {
-      lines.push('**Match:** none');
-      lines.push('\n> No Wikidata entity found for this external identifier.');
-    } else {
+    if (result.match !== null) {
       lines.push(`**Match:** ${result.match.label || result.match.id}`);
       lines.push('');
       lines.push(`## ${result.match.label || result.match.id}`);
       lines.push(`**QID:** ${result.match.id}`);
       if (result.match.description) lines.push(`**Description:** ${result.match.description}`);
       lines.push(`**URL:** ${result.match.url}`);
+    } else if (result.multipleMatches?.length) {
+      lines.push(
+        `**Match:** multiple (${result.multipleMatches.length}) — Wikidata data integrity issue`,
+      );
+      lines.push(
+        '\n**Multiple entities claim this external ID — select the correct QID manually:**',
+      );
+      for (const entry of result.multipleMatches) {
+        lines.push(`- ${entry.id}: ${entry.label || '(no label)'}`);
+      }
+    } else {
+      lines.push('**Match:** none');
+      lines.push('\n> No Wikidata entity found for this external identifier.');
     }
 
-    if (result.multipleMatches?.length) {
-      lines.push('\n**Multiple matches (data integrity issue in Wikidata):**');
-      for (const m of result.multipleMatches) {
-        lines.push(`- ${m.id}: ${m.label || '(no label)'}`);
+    // Render multipleMatches even when match is present — satisfies format parity for linter
+    // synthetic variants that populate both fields simultaneously.
+    if (result.match !== null && result.multipleMatches?.length) {
+      lines.push('\n**Also matched:**');
+      for (const entry of result.multipleMatches) {
+        lines.push(`- ${entry.id}: ${entry.label || '(no label)'}`);
       }
     }
 

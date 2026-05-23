@@ -3,7 +3,6 @@
  * @module tests/tools/get-entity.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataGetEntity } from '@/mcp-server/tools/definitions/get-entity.tool.js';
@@ -158,8 +157,8 @@ describe('wikidataGetEntity', () => {
     expect(text).toContain('Sitelinks');
   });
 
-  it('throws entity_not_found for NotFound error code', async () => {
-    mockFetchEntity.mockRejectedValue({ code: JsonRpcErrorCode.NotFound });
+  it('throws entity_not_found for 404 HTTP status', async () => {
+    mockFetchEntity.mockRejectedValue({ data: { status: 404 } });
 
     const ctx = createMockContext({ errors: wikidataGetEntity.errors });
     const input = wikidataGetEntity.input.parse({ id: 'Q76' });

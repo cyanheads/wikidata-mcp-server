@@ -129,8 +129,7 @@ export class WikidataRestService {
     // For multiple properties we fetch all and client-filter.
     const url =
       properties?.length === 1
-        ? // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          `${REST_BASE}/${basePath}?property=${properties[0]?.toUpperCase()}`
+        ? `${REST_BASE}/${basePath}?property=${properties[0]?.toUpperCase()}`
         : `${REST_BASE}/${basePath}`;
 
     ctx.log.debug('Fetching statements', { id: normalized, properties });

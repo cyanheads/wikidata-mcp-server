@@ -130,8 +130,7 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
     try {
       entity = await svc.fetchEntity(id, ctx);
     } catch (err) {
-      const e = err as { code?: number; data?: { status?: number } };
-      if (e?.data?.status === 404 || e?.code === JsonRpcErrorCode.NotFound) {
+      if ((err as { data?: { status?: number } })?.data?.status === 404) {
         throw ctx.fail('entity_not_found', `No entity found for ID "${id}".`, {
           ...ctx.recoveryFor('entity_not_found'),
         });

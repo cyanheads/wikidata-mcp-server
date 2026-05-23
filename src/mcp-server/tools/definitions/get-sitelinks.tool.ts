@@ -19,7 +19,7 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
     'Major items can have 300+ sitelinks across languages. ' +
     'Use sites to filter to specific language editions, or wikis_only to return only Wikipedia links. ' +
     'Only Q-IDs (items) have sitelinks — properties (P-IDs) do not.',
-  annotations: { readOnlyHint: true },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
     id: z
@@ -103,8 +103,7 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
     try {
       rawSitelinks = await svc.fetchSitelinks(id, input.sites, ctx);
     } catch (err) {
-      const e = err as { data?: { status?: number }; code?: number };
-      if (e?.data?.status === 404 || e?.code === JsonRpcErrorCode.NotFound) {
+      if ((err as { data?: { status?: number } })?.data?.status === 404) {
         throw ctx.fail('entity_not_found', `No item found for Q-ID "${id}".`, {
           ...ctx.recoveryFor('entity_not_found'),
         });

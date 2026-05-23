@@ -108,7 +108,7 @@ describe('wikidataResolveExternalId', () => {
     });
   });
 
-  it('throws multiple_matches when more than one entity claims the ID', async () => {
+  it('returns null match with multipleMatches when more than one entity claims the ID', async () => {
     mockQuery.mockResolvedValue({
       head: { vars: ['item', 'itemLabel', 'itemDescription'] },
       results: {
@@ -127,9 +127,12 @@ describe('wikidataResolveExternalId', () => {
 
     const ctx = createMockContext({ errors: wikidataResolveExternalId.errors });
     const input = wikidataResolveExternalId.input.parse({ property: 'P356', value: '10.1234/dup' });
-    await expect(wikidataResolveExternalId.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'multiple_matches' },
-    });
+    const result = await wikidataResolveExternalId.handler(input, ctx);
+
+    expect(result.match).toBeNull();
+    expect(result.multipleMatches).toHaveLength(2);
+    expect(result.multipleMatches?.[0]?.id).toBe('Q111');
+    expect(result.multipleMatches?.[1]?.id).toBe('Q222');
   });
 
   it('deduplicates bindings for the same QID', async () => {

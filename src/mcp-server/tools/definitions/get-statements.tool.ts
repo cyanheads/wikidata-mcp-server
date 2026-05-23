@@ -22,7 +22,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
     'Use the properties parameter to fetch only specific P-IDs — omitting it returns all statements, ' +
     'which can be large. Designed for fact verification: "what does Wikidata say about this entity\'s {property}?". ' +
     'Preferred-rank statements are the most current values.',
-  annotations: { readOnlyHint: true },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
     id: z
@@ -104,8 +104,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
     try {
       rawStatements = await svc.fetchStatements(id, input.properties, ctx);
     } catch (err) {
-      const e = err as { data?: { status?: number }; code?: number };
-      if (e?.data?.status === 404 || e?.code === JsonRpcErrorCode.NotFound) {
+      if ((err as { data?: { status?: number } })?.data?.status === 404) {
         throw ctx.fail('entity_not_found', `No entity found for ID "${id}".`, {
           ...ctx.recoveryFor('entity_not_found'),
         });
