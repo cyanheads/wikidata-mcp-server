@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "wikidata-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server for Wikidata — entity search and fetch, SPARQL queries, and external ID lookup.",
   "author": { "name": "cyanheads" },
   "server": {
