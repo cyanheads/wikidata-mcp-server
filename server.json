@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "wikidata-mcp-server",
-  "description": "",
+  "name": "cyanheads/wikidata-mcp-server",
+  "description": "MCP server for Wikidata — entity search and fetch, SPARQL queries, and external ID lookup.",
   "repository": {
-    "url": "",
+    "url": "https://github.com/cyanheads/wikidata-mcp-server",
     "source": "github"
   },
   "version": "0.1.0",

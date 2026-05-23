@@ -5,17 +5,31 @@
  */
 
 import { createApp } from '@cyanheads/mcp-ts-core';
-import { echoTool } from './mcp-server/tools/definitions/echo.tool.js';
-import { echoAppTool } from './mcp-server/tools/definitions/echo-app.app-tool.js';
-import { echoResource } from './mcp-server/resources/definitions/echo.resource.js';
-import { echoAppUiResource } from './mcp-server/resources/definitions/echo-app-ui.app-resource.js';
-import { echoPrompt } from './mcp-server/prompts/definitions/echo.prompt.js';
+import { wikidataEntityResource } from './mcp-server/resources/definitions/entity.resource.js';
+import { wikidataGetEntity } from './mcp-server/tools/definitions/get-entity.tool.js';
+import { wikidataGetLabels } from './mcp-server/tools/definitions/get-labels.tool.js';
+import { wikidataGetSitelinks } from './mcp-server/tools/definitions/get-sitelinks.tool.js';
+import { wikidataGetStatements } from './mcp-server/tools/definitions/get-statements.tool.js';
+import { wikidataResolveExternalId } from './mcp-server/tools/definitions/resolve-external-id.tool.js';
+import { wikidataSearchEntities } from './mcp-server/tools/definitions/search-entities.tool.js';
+import { wikidataSparqlQuery } from './mcp-server/tools/definitions/sparql-query.tool.js';
+import { initWikidataRestService } from './services/wikidata/wikidata-rest-service.js';
+import { initWikidataSparqlService } from './services/wikidata/wikidata-sparql-service.js';
 
 await createApp({
-  tools: [echoTool, echoAppTool],
-  resources: [echoResource, echoAppUiResource],
-  prompts: [echoPrompt],
-  // instructions: 'Server-level orientation forwarded to the model on every initialize.\n' +
-  //   '- Use shortcut `X` for the most common case\n' +
-  //   '- Tools require auth via the `inventory:read` scope',
+  tools: [
+    wikidataSearchEntities,
+    wikidataGetEntity,
+    wikidataGetLabels,
+    wikidataGetStatements,
+    wikidataGetSitelinks,
+    wikidataSparqlQuery,
+    wikidataResolveExternalId,
+  ],
+  resources: [wikidataEntityResource],
+  prompts: [],
+  setup(core) {
+    initWikidataRestService(core.config, core.storage);
+    initWikidataSparqlService(core.config, core.storage);
+  },
 });
