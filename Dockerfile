@@ -8,6 +8,9 @@ FROM oven/bun:1.3 AS build
 
 WORKDIR /usr/src/app
 
+# Install node for tsx-based build scripts
+RUN apt-get update -qq && apt-get install -y --no-install-recommends nodejs npm && rm -rf /var/lib/apt/lists/*
+
 # Copy dependency manifests for optimized layer caching
 COPY package.json bun.lock ./
 
@@ -17,8 +20,8 @@ RUN bun install --frozen-lockfile
 # Copy the rest of the source code
 COPY . .
 
-# Build the application
-RUN bun run build
+# Build the application (npm invokes node/tsx rather than bun for script runner)
+RUN npm run build
 
 
 # ==============================================================================
