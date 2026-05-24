@@ -18,8 +18,8 @@ export type RawSearchResult = {
   id: string;
   /** Display label — nested { language, value } in REST v1.5. */
   'display-label'?: { language: string; value: string } | null;
-  /** Display description — nested { language, value }. */
-  'display-description'?: { language: string; value: string } | null;
+  /** Description — nested { language, value } in REST v1. Note: the field is "description", not "display-description". */
+  description?: { language: string; value: string } | null;
   match?: {
     type: string;
     language: string;

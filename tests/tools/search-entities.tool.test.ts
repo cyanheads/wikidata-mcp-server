@@ -23,7 +23,7 @@ describe('wikidataSearchEntities', () => {
       {
         id: 'Q76',
         'display-label': { language: 'en', value: 'Barack Obama' },
-        'display-description': { language: 'en', value: '44th U.S. President' },
+        description: { language: 'en', value: '44th U.S. President' },
         match: { type: 'label', language: 'en' },
       },
     ]);
@@ -59,7 +59,7 @@ describe('wikidataSearchEntities', () => {
       {
         id: 'P31',
         'display-label': { language: 'en', value: 'instance of' },
-        'display-description': {
+        description: {
           language: 'en',
           value: 'that class of which this subject is a particular example and member',
         },

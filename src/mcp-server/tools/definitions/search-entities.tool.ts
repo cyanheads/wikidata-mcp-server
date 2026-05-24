@@ -121,7 +121,7 @@ export const wikidataSearchEntities = tool('wikidata_search_entities', {
     const results = raw.map((r) => ({
       id: r.id,
       label: r['display-label']?.value ?? '',
-      description: r['display-description']?.value ?? '',
+      description: r.description?.value ?? '',
       match: {
         type: r.match?.type ?? 'label',
         language: r.match?.language ?? input.language,
