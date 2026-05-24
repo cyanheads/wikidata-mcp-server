@@ -20,15 +20,12 @@ const mockEntity = {
   id: 'Q76',
   type: 'item' as const,
   labels: {
-    en: { language: 'en', value: 'Barack Obama' },
-    de: { language: 'de', value: 'Barack Obama' },
+    en: 'Barack Obama',
+    de: 'Barack Obama',
   },
-  descriptions: { en: { language: 'en', value: '44th U.S. President' } },
+  descriptions: { en: '44th U.S. President' },
   aliases: {
-    en: [
-      { language: 'en', value: 'Obama' },
-      { language: 'en', value: 'President Obama' },
-    ],
+    en: ['Obama', 'President Obama'],
   },
   statements: {
     P31: [
@@ -104,7 +101,7 @@ describe('wikidataGetEntity', () => {
   });
 
   it('throws entity_not_found when service returns 404', async () => {
-    mockFetchEntity.mockRejectedValue({ data: { status: 404 } });
+    mockFetchEntity.mockRejectedValue({ data: { statusCode: 404 } });
 
     const ctx = createMockContext({ errors: wikidataGetEntity.errors });
     const input = wikidataGetEntity.input.parse({ id: 'Q99999999' });
@@ -158,7 +155,7 @@ describe('wikidataGetEntity', () => {
   });
 
   it('throws entity_not_found for 404 HTTP status', async () => {
-    mockFetchEntity.mockRejectedValue({ data: { status: 404 } });
+    mockFetchEntity.mockRejectedValue({ data: { statusCode: 404 } });
 
     const ctx = createMockContext({ errors: wikidataGetEntity.errors });
     const input = wikidataGetEntity.input.parse({ id: 'Q76' });

@@ -3,17 +3,11 @@
  * @module services/wikidata/types
  */
 
-/** A single label or description entry (REST API nested object form). */
-export type LocalizedString = {
-  language: string;
-  value: string;
-};
+/** A label or description map from the REST entity endpoint (plain string values). */
+export type LocalizedStringMap = Record<string, string>;
 
-/** A label or description map from the REST entity endpoint. */
-export type LocalizedStringMap = Record<string, LocalizedString>;
-
-/** Aliases map from the REST entity endpoint. */
-export type AliasMap = Record<string, LocalizedString[]>;
+/** Aliases map from the REST entity endpoint (plain string array values). */
+export type AliasMap = Record<string, string[]>;
 
 // ---------------------------------------------------------------------------
 // REST API — raw response shapes

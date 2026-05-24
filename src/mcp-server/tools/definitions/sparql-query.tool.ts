@@ -10,7 +10,7 @@ import { getWikidataSparqlService } from '@/services/wikidata/wikidata-sparql-se
 export const wikidataSparqlQuery = tool('wikidata_sparql_query', {
   title: 'Wikidata SPARQL Query',
   description:
-    'Execute a SPARQL SELECT query against the Wikidata Query Service (Blazegraph). ' +
+    'Execute a SPARQL SELECT query against the Wikidata Query Service. ' +
     'Full graph power: multi-hop traversals, aggregations, subqueries, OPTIONAL, FILTER, UNION, BIND. ' +
     'Standard Wikidata prefixes (wd:, wdt:, p:, ps:, pq:, wikibase:, bd:) are auto-injected. ' +
     'The wikibase:label SERVICE is also auto-injected when language is set and the query includes ?<var>Label ' +
@@ -26,7 +26,7 @@ export const wikidataSparqlQuery = tool('wikidata_sparql_query', {
       .min(1)
       .describe(
         'SPARQL SELECT query. Must be a SELECT query (not CONSTRUCT/DESCRIBE/ASK). ' +
-          'Standard prefixes are auto-injected; do not include them yourself. ' +
+          'Standard prefixes (wd:, wdt:, p:, ps:, pq:, wikibase:, bd:) are injected automatically. ' +
           'Example: SELECT ?item ?itemLabel WHERE { ?item wdt:P31 wd:Q146. } LIMIT 10',
       ),
     language: z

@@ -12,8 +12,7 @@ export const wikidataGetLabels = tool('wikidata_get_labels', {
   description:
     'Resolve one or more QIDs or PIDs to their human-readable labels and descriptions. ' +
     'Lightweight — returns no claim data. Supports up to 50 IDs per call (batched automatically). ' +
-    'Designed for the common agent pattern: receive QIDs from a SPARQL query, then humanize them. ' +
-    'Uses the MediaWiki wbgetentities API for efficient batch resolution.',
+    'Designed for the common agent pattern: receive QIDs from a SPARQL query, then humanize them.',
   annotations: { readOnlyHint: true, openWorldHint: false },
 
   input: z.object({

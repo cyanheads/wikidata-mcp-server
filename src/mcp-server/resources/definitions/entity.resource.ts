@@ -22,9 +22,6 @@ export const wikidataEntityResource = resource('wikidata://entity/{id}', {
   params: z.object({
     id: z.string().describe('Q-ID (e.g., "Q76") or P-ID (e.g., "P31") of the entity.'),
   }),
-  output: z.object({
-    content: z.string().describe('Compact markdown summary of the entity.'),
-  }),
 
   async handler(params, ctx) {
     const id = normalizeId(params.id);
@@ -43,8 +40,8 @@ export const wikidataEntityResource = resource('wikidata://entity/{id}', {
     try {
       entity = await svc.fetchEntity(id, ctx);
     } catch (err) {
-      const e = err as { data?: { status?: number }; code?: number };
-      if (e?.data?.status === 404) {
+      const e = err as { data?: { statusCode?: number }; code?: number };
+      if (e?.data?.statusCode === 404) {
         throw notFound(`No Wikidata entity found for ID "${id}".`, { id }, { cause: err as Error });
       }
       throw err;
@@ -53,11 +50,11 @@ export const wikidataEntityResource = resource('wikidata://entity/{id}', {
     const lines: string[] = [];
 
     // Header: ID + English label
-    const enLabel = entity.labels?.en?.value;
+    const enLabel = entity.labels?.en;
     lines.push(`# ${enLabel ? `${enLabel} (${id})` : id}`);
 
     // English description
-    const enDesc = entity.descriptions?.en?.value;
+    const enDesc = entity.descriptions?.en;
     if (enDesc) lines.push(`*${enDesc}*`);
 
     lines.push('');
@@ -75,8 +72,8 @@ export const wikidataEntityResource = resource('wikidata://entity/{id}', {
       const values = instanceOf
         .slice(0, 3)
         .map((stmt) => {
-          const content = stmt.value?.content as { id?: string } | null;
-          return content?.id ?? '?';
+          const content = stmt.value?.content;
+          return (typeof content === 'string' ? content : (content as { id?: string })?.id) ?? '?';
         })
         .join(', ');
       lines.push(`**Instance of:** ${values} *(resolve with wikidata_get_labels)*`);
@@ -107,7 +104,7 @@ export const wikidataEntityResource = resource('wikidata://entity/{id}', {
       lines.push(`**Labels available:** ${labelCount} languages`);
       const sample = Object.entries(entity.labels ?? {})
         .slice(0, 5)
-        .map(([lang, lb]) => `${lang}: ${lb.value}`)
+        .map(([lang, lb]) => `${lang}: ${lb}`)
         .join(' | ');
       if (sample) lines.push(sample);
     }
@@ -121,7 +118,7 @@ export const wikidataEntityResource = resource('wikidata://entity/{id}', {
     lines.push('');
     lines.push(`**Wikidata URL:** https://www.wikidata.org/wiki/${id}`);
 
-    return { content: lines.join('\n') };
+    return lines.join('\n');
   },
 
   list: () => ({

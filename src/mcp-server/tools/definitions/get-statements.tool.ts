@@ -104,7 +104,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
     try {
       rawStatements = await svc.fetchStatements(id, input.properties, ctx);
     } catch (err) {
-      if ((err as { data?: { status?: number } })?.data?.status === 404) {
+      if ((err as { data?: { statusCode?: number } })?.data?.statusCode === 404) {
         throw ctx.fail('entity_not_found', `No entity found for ID "${id}".`, {
           ...ctx.recoveryFor('entity_not_found'),
         });
@@ -119,14 +119,17 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
       for (const stmts of Object.values(rawStatements)) {
         for (const stmt of stmts) {
           if (stmt.property?.data_type === 'wikibase-item') {
-            const content = stmt.value?.content as { id?: string } | null;
-            if (content?.id) qidsToResolve.add(content.id);
+            const content = stmt.value?.content;
+            const qid = typeof content === 'string' ? content : (content as { id?: string })?.id;
+            if (qid) qidsToResolve.add(qid);
           }
           // Also check qualifier values
           for (const q of stmt.qualifiers ?? []) {
             if (q.property?.data_type === 'wikibase-item') {
-              const qContent = q.value?.content as { id?: string } | null;
-              if (qContent?.id) qidsToResolve.add(qContent.id);
+              const qContent = q.value?.content;
+              const qid =
+                typeof qContent === 'string' ? qContent : (qContent as { id?: string })?.id;
+              if (qid) qidsToResolve.add(qid);
             }
           }
         }

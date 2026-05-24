@@ -18,9 +18,8 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
   title: 'Get Wikidata Entity',
   description:
     'Fetch a Wikidata entity (item or property) by QID or PID. ' +
-    'The REST API always returns the full entity payload (300KB+ for major items like Q76 Barack Obama). ' +
-    'Use the fields parameter to trim what is returned to the caller — the network cost is fixed, ' +
-    'but the context budget benefit is real. Omit fields to get all data. ' +
+    'Use the fields parameter to trim what is returned to the caller — major items can be large. ' +
+    'Omit fields to get all data. ' +
     'Q-IDs (e.g. Q76) fetch items; P-IDs (e.g. P31) fetch properties from the correct endpoint automatically. ' +
     'Use wikidata_get_statements for deep claim traversal with label resolution.',
   annotations: { readOnlyHint: true, openWorldHint: true },
@@ -37,7 +36,7 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       .optional()
       .describe(
         'Fields to include in the response. Options: "labels", "descriptions", "aliases", "statements", "sitelinks". ' +
-          'Omit for all fields. Filtering is client-side — the full entity is always fetched from the API.',
+          'Omit for all fields.',
       ),
     languages: z
       .array(z.string())
@@ -130,7 +129,7 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
     try {
       entity = await svc.fetchEntity(id, ctx);
     } catch (err) {
-      if ((err as { data?: { status?: number } })?.data?.status === 404) {
+      if ((err as { data?: { statusCode?: number } })?.data?.statusCode === 404) {
         throw ctx.fail('entity_not_found', `No entity found for ID "${id}".`, {
           ...ctx.recoveryFor('entity_not_found'),
         });
@@ -154,23 +153,6 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       return Object.keys(filtered).length ? filtered : undefined;
     };
 
-    // Flatten label/description maps from { language, value } → string
-    const flattenLabelMap = (
-      map: Record<string, { language: string; value: string }> | undefined,
-    ): Record<string, string> | undefined => {
-      if (!map) return;
-      return Object.fromEntries(Object.entries(map).map(([lang, entry]) => [lang, entry.value]));
-    };
-
-    const flattenAliasMap = (
-      map: Record<string, Array<{ language: string; value: string }>> | undefined,
-    ): Record<string, string[]> | undefined => {
-      if (!map) return;
-      return Object.fromEntries(
-        Object.entries(map).map(([lang, entries]) => [lang, entries.map((e) => e.value)]),
-      );
-    };
-
     const result: Record<string, unknown> = {
       id: entity.id,
       type: entity.type,
@@ -180,15 +162,15 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
     if (entity.data_type) result.data_type = entity.data_type;
 
     if (requestedFields.has('labels')) {
-      const labels = flattenLabelMap(filterLangs(entity.labels));
+      const labels = filterLangs(entity.labels);
       if (labels) result.labels = labels;
     }
     if (requestedFields.has('descriptions')) {
-      const descriptions = flattenLabelMap(filterLangs(entity.descriptions));
+      const descriptions = filterLangs(entity.descriptions);
       if (descriptions) result.descriptions = descriptions;
     }
     if (requestedFields.has('aliases')) {
-      const aliases = flattenAliasMap(filterLangs(entity.aliases));
+      const aliases = filterLangs(entity.aliases);
       if (aliases) result.aliases = aliases;
     }
     if (requestedFields.has('statements') && entity.statements) {
