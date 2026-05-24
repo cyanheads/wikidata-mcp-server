@@ -1,12 +1,13 @@
 {
   "name": "@cyanheads/wikidata-mcp-server",
   "version": "0.1.1",
-  "description": "MCP server for Wikidata — entity search and fetch, SPARQL queries, and external ID lookup.",
+  "mcpName": "io.github.cyanheads/wikidata-mcp-server",
+  "description": "Search and fetch Wikidata entities, execute SPARQL queries, resolve external identifiers via MCP. STDIO or Streamable HTTP.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "@cyanheads/wikidata-mcp-server": "dist/index.js"
+    "wikidata-mcp-server": "dist/index.js"
   },
   "files": [
     "changelog/",
@@ -41,8 +42,7 @@
     "mcp",
     "mcp-server",
     "model-context-protocol",
-    "ai",
-    "llm",
+    "typescript",
     "bun",
     "stdio",
     "streamable-http",
@@ -54,9 +54,25 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/cyanheads/wikidata-mcp-server"
+    "url": "git+https://github.com/cyanheads/wikidata-mcp-server.git"
   },
+  "bugs": {
+    "url": "https://github.com/cyanheads/wikidata-mcp-server/issues"
+  },
+  "homepage": "https://github.com/cyanheads/wikidata-mcp-server#readme",
+  "author": "cyanheads <casey@caseyjhand.com> (https://github.com/cyanheads/wikidata-mcp-server#readme)",
+  "funding": [
+    {
+      "type": "github",
+      "url": "https://github.com/sponsors/cyanheads"
+    },
+    {
+      "type": "buy_me_a_coffee",
+      "url": "https://www.buymeacoffee.com/cyanheads"
+    }
+  ],
   "license": "Apache-2.0",
+  "packageManager": "bun@1.3.2",
   "engines": {
     "bun": ">=1.3.0",
     "node": ">=24.0.0"

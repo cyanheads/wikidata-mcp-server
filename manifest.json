@@ -2,8 +2,14 @@
   "manifest_version": "0.3",
   "name": "wikidata-mcp-server",
   "version": "0.1.1",
-  "description": "MCP server for Wikidata — entity search and fetch, SPARQL queries, and external ID lookup.",
+  "description": "Search and fetch Wikidata entities, execute SPARQL queries, resolve external identifiers.",
   "author": { "name": "cyanheads" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cyanheads/wikidata-mcp-server"
+  },
+  "homepage": "https://github.com/cyanheads/wikidata-mcp-server#readme",
+  "license": "Apache-2.0",
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",

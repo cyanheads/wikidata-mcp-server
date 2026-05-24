@@ -1,6 +1,6 @@
 # wikidata-mcp-server - Directory Structure
 
-Generated on: 2026-05-23 18:10:16
+Generated on: 2026-05-24 02:31:03
 
 ```text
 wikidata-mcp-server/
@@ -143,6 +143,7 @@ wikidata-mcp-server/
 ├── .mcpbignore
 ├── biome.json
 ├── bun.lock
+├── bunfig.toml
 ├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json

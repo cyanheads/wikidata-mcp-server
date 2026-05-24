@@ -1,6 +1,6 @@
 <div align="center">
   <h1>@cyanheads/wikidata-mcp-server</h1>
-  <p><b>Search and fetch Wikidata entities, execute SPARQL queries, resolve external identifiers. STDIO or Streamable HTTP.</b>
+  <p><b>Search and fetch Wikidata entities, execute SPARQL queries, resolve external identifiers via MCP. STDIO or Streamable HTTP.</b>
   <div>7 Tools • 1 Resource</div>
   </p>
 </div>
@@ -122,9 +122,11 @@ Look up a Wikidata entity by an external identifier.
 |:---|:---|:---|
 | Resource | `wikidata://entity/{id}` | Compact markdown summary of a Wikidata entity — labels, English description, instance-of, Wikipedia link, image, and statement count |
 
+All resource data is also reachable via tools.
+
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
+Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
 
 - Declarative tool definitions — single file per tool, framework handles registration and validation
 - Unified error handling across all tools
@@ -183,6 +185,20 @@ Or with npx (no Bun required):
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_LOG_LEVEL": "info"
       }
+    }
+  }
+}
+```
+
+Or with Docker:
+
+```json
+{
+  "mcpServers": {
+    "wikidata": {
+      "type": "stdio",
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/wikidata-mcp-server:latest"]
     }
   }
 }
@@ -290,4 +306,4 @@ bun run test
 
 ## License
 
-This project is licensed under the Apache 2.0 License. See the [LICENSE](./LICENSE) file for details.
+Apache-2.0 — see [LICENSE](./LICENSE) for details.
