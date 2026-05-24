@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-05-23
+
+Metadata alignment to pubmed gold standard — scripts, descriptions, Dockerfile labels, README badges
+
 ## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-05-23
 
 Sync tagline across all surfaces — adds 'and' before 'resolve external identifiers'
