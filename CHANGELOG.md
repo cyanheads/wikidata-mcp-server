@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.6](changelog/0.1.x/0.1.6.md) — 2026-05-24
+
+Three field-test bug fixes: SPARQL label SERVICE injection with LIMIT, empty search descriptions, 400 from out-of-range IDs
+
 ## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-05-23
 
 Hosted server endpoint — remotes block in server.json, public URL in README
