@@ -164,8 +164,17 @@ export class WikidataSparqlService {
     // Inject label SERVICE if language is set and the SERVICE block is absent
     const hasLabelService = /SERVICE\s+wikibase:label/i.test(query);
     if (language && !hasLabelService) {
-      // Insert before closing brace of the last WHERE clause
-      query = query.replace(/\}\s*$/, `  ${LABEL_SERVICE_SNIPPET(language)}\n}`);
+      // Insert before the final } — then re-attach any trailing LIMIT/OFFSET/ORDER BY/GROUP BY/HAVING.
+      // The original /\}\s*$/ only matched when } was the last character, so queries ending with
+      // LIMIT N (or other solution modifiers) silently skipped injection.
+      query = query.replace(
+        /(\})\s*((?:(?:LIMIT|OFFSET|ORDER\s+BY|GROUP\s+BY|HAVING)\b)[\s\S]*)$/i,
+        (_, brace, tail) => `  ${LABEL_SERVICE_SNIPPET(language)}\n${brace}\n${tail.trimStart()}`,
+      );
+      // Fallback: if no trailing modifier was found, the original pattern still applies
+      if (!query.includes(LABEL_SERVICE_SNIPPET(language))) {
+        query = query.replace(/\}\s*$/, `  ${LABEL_SERVICE_SNIPPET(language)}\n}`);
+      }
     }
 
     // Prepend standard prefixes (only those not already declared)
