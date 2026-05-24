@@ -58,7 +58,7 @@ export const wikidataGetLabels = tool('wikidata_get_labels', {
   errors: [
     {
       reason: 'invalid_ids',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'One or more IDs in the array are not valid Q-IDs or P-IDs.',
       recovery:
         'All IDs must match Q+digits or P+digits format (e.g., Q76, P31). Use wikidata_search_entities to find valid IDs.',

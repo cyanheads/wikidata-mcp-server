@@ -25,6 +25,9 @@ import type {
 const REST_BASE = 'https://www.wikidata.org/w/rest.php/wikibase/v1';
 const MW_API_BASE = 'https://www.wikidata.org/w/api.php';
 
+/** Returns true if the response body is an HTML page (rate-limit or maintenance page). */
+const isHtmlResponse = (text: string): boolean => /^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text);
+
 /** Checks if an ID is a Q-ID (item). */
 export function isQId(id: string): boolean {
   return /^[Qq]\d+$/.test(id);
@@ -69,7 +72,7 @@ export class WikidataRestService {
           throw await httpErrorFromResponse(response, { service: 'Wikidata REST' });
         }
         const text = await response.text();
-        if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
+        if (isHtmlResponse(text)) {
           const { serviceUnavailable } = await import('@cyanheads/mcp-ts-core/errors');
           throw serviceUnavailable(
             'Wikidata REST returned HTML — likely rate-limited or under maintenance.',
@@ -210,7 +213,7 @@ export class WikidataRestService {
               throw await httpErrorFromResponse(response, { service: 'Wikidata MW API' });
             }
             const text = await response.text();
-            if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
+            if (isHtmlResponse(text)) {
               const { serviceUnavailable } = await import('@cyanheads/mcp-ts-core/errors');
               throw serviceUnavailable('Wikidata MW API returned HTML — likely rate-limited.');
             }
@@ -226,20 +229,15 @@ export class WikidataRestService {
 
         if (data.entities) {
           for (const [id, entity] of Object.entries(data.entities)) {
-            if ((entity as { missing?: string }).missing === '') continue;
-            const labelMap: Record<string, string> = {};
-            const descMap: Record<string, string> = {};
-            if (entity.labels) {
-              for (const [lang, lb] of Object.entries(entity.labels)) {
-                labelMap[lang] = lb.value;
-              }
-            }
-            if (entity.descriptions) {
-              for (const [lang, ds] of Object.entries(entity.descriptions)) {
-                descMap[lang] = ds.value;
-              }
-            }
-            results[id] = { labels: labelMap, descriptions: descMap };
+            if (entity.missing === '') continue;
+            results[id] = {
+              labels: Object.fromEntries(
+                Object.entries(entity.labels ?? {}).map(([lang, lb]) => [lang, lb.value]),
+              ),
+              descriptions: Object.fromEntries(
+                Object.entries(entity.descriptions ?? {}).map(([lang, ds]) => [lang, ds.value]),
+              ),
+            };
           }
         }
       }),
@@ -319,17 +317,14 @@ export function normalizeStatementValue(
     return { type: 'other', raw: rawContent };
   }
 
+  if (effective === 'external-id' || effective === 'url') {
+    return { type: effective, value: String(rawContent ?? '') };
+  }
+
   if (
-    [
-      'external-id',
-      'url',
-      'string',
-      'commonsMedia',
-      'geo-shape',
-      'tabular-data',
-      'math',
-      'musical-notation',
-    ].includes(effective)
+    ['string', 'commonsMedia', 'geo-shape', 'tabular-data', 'math', 'musical-notation'].includes(
+      effective,
+    )
   ) {
     return { type: 'string', value: String(rawContent ?? '') };
   }
@@ -349,16 +344,14 @@ export function normalizeStatements(
     const rawValue = normalizeStatementValue(dataType, raw.value?.content);
 
     // Resolve label for wikibase-item values
-    let value: StatementValue;
-    if (rawValue.type === 'wikibase-item') {
-      const label = labelMap?.[rawValue.qid];
-      value =
-        label !== undefined
-          ? { type: 'wikibase-item', qid: rawValue.qid, label }
-          : { type: 'wikibase-item', qid: rawValue.qid };
-    } else {
-      value = rawValue;
-    }
+    const value: StatementValue =
+      rawValue.type === 'wikibase-item'
+        ? {
+            type: 'wikibase-item',
+            qid: rawValue.qid,
+            ...(labelMap?.[rawValue.qid] != null ? { label: labelMap[rawValue.qid] } : {}),
+          }
+        : rawValue;
 
     const qualifiers = raw.qualifiers?.map((q) => ({
       property: q.property?.id ?? '',

@@ -71,7 +71,7 @@ export const wikidataSparqlQuery = tool('wikidata_sparql_query', {
   errors: [
     {
       reason: 'parse_error',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'SPARQL syntax error — the query could not be parsed.',
       recovery:
         'Check SPARQL syntax: verify prefix usage, bracket matching, and SELECT clause format. The error message includes the relevant line.',

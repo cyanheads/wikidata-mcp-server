@@ -107,7 +107,7 @@ export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
   errors: [
     {
       reason: 'invalid_property',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'Property ID is not in P+digits format.',
       recovery: 'Supply a valid P-ID (P followed by digits, e.g. P356 for DOI).',
     },
@@ -157,12 +157,7 @@ LIMIT 5`;
     }));
 
     // Deduplicate by QID (SPARQL may return multiple rows for same item with different labels)
-    const seen = new Set<string>();
-    const unique = matches.filter((m) => {
-      if (seen.has(m.id)) return false;
-      seen.add(m.id);
-      return true;
-    });
+    const unique = [...new Map(matches.map((m) => [m.id, m])).values()];
 
     if (unique.length > 1) {
       // Wikidata data integrity issue — multiple entities claim the same external ID.
@@ -176,7 +171,7 @@ LIMIT 5`;
     }
 
     // unique.length === 1 guaranteed by the preceding check
-    const m = unique[0] as NonNullable<(typeof unique)[number]>;
+    const m = unique[0] as (typeof unique)[number];
     return {
       match: {
         id: m.id,

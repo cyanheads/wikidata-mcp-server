@@ -1,6 +1,6 @@
 # wikidata-mcp-server - Directory Structure
 
-Generated on: 2026-05-24 02:31:03
+Generated on: 2026-05-24 21:55:56
 
 ```text
 wikidata-mcp-server/
@@ -78,6 +78,8 @@ wikidata-mcp-server/
 │   ├── design-mcp-server/
 │   │   └── SKILL.md
 │   ├── field-test/
+│   │   └── SKILL.md
+│   ├── git-wrapup/
 │   │   └── SKILL.md
 │   ├── maintenance/
 │   │   └── SKILL.md

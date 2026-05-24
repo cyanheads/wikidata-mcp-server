@@ -77,7 +77,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
     },
     {
       reason: 'invalid_id',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'ID is not a valid Q-ID or P-ID format.',
       recovery: 'Supply a valid Q-ID (Q followed by digits) or P-ID (P followed by digits).',
     },
@@ -119,19 +119,23 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
     const labelMap: Record<string, string> = {};
     if (input.resolve_labels) {
       const qidsToResolve = new Set<string>();
+
+      /** Extract QID from a wikibase-item content value. */
+      const extractQid = (content: unknown): string | undefined => {
+        if (typeof content === 'string') return content;
+        const c = content as { id?: string } | null;
+        return c?.id ?? undefined;
+      };
+
       for (const stmts of Object.values(rawStatements)) {
         for (const stmt of stmts) {
           if (stmt.property?.data_type === 'wikibase-item') {
-            const content = stmt.value?.content;
-            const qid = typeof content === 'string' ? content : (content as { id?: string })?.id;
+            const qid = extractQid(stmt.value?.content);
             if (qid) qidsToResolve.add(qid);
           }
-          // Also check qualifier values
           for (const q of stmt.qualifiers ?? []) {
             if (q.property?.data_type === 'wikibase-item') {
-              const qContent = q.value?.content;
-              const qid =
-                typeof qContent === 'string' ? qContent : (qContent as { id?: string })?.id;
+              const qid = extractQid(q.value?.content);
               if (qid) qidsToResolve.add(qid);
             }
           }

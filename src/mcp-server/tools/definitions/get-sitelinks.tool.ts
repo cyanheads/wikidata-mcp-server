@@ -79,7 +79,7 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
     },
     {
       reason: 'not_an_item',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'A P-ID was supplied — only items (Q-IDs) have sitelinks.',
       recovery: 'Supply a Q-ID (Q followed by digits). Properties do not have Wikipedia sitelinks.',
     },

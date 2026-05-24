@@ -100,7 +100,7 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
     },
     {
       reason: 'invalid_id',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'ID format is not recognized as a Q-ID or P-ID.',
       recovery:
         'Supply a valid Q-ID (Q followed by digits, e.g. Q76) or P-ID (P followed by digits, e.g. P31).',

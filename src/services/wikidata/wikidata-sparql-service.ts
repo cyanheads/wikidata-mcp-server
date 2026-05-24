@@ -12,6 +12,9 @@ import type { SparqlResponse } from './types.js';
 
 const SPARQL_ENDPOINT = 'https://query.wikidata.org/sparql';
 
+/** Returns true if the response body is an HTML page (rate-limit or maintenance page). */
+const isHtmlResponse = (text: string): boolean => /^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text);
+
 /** Common SPARQL prefixes pre-pended to every query. */
 const SPARQL_PREFIXES = `PREFIX wd: <http://www.wikidata.org/entity/>
 PREFIX wdt: <http://www.wikidata.org/prop/direct/>
@@ -35,20 +38,12 @@ const LABEL_SERVICE_SNIPPET = (lang: string) =>
  *   ... (stack frames)
  */
 function extractSparqlError(body: string): string {
-  // Try to find the MalformedQueryException message
-  const mqMatch = /MalformedQueryException:\s*(.+?)(?:\r?\n|$)/.exec(body);
-  if (mqMatch?.[1]) return mqMatch[1].trim();
-
-  // Try QueryEvaluationException
-  const qeMatch = /QueryEvaluationException:\s*(.+?)(?:\r?\n|$)/.exec(body);
-  if (qeMatch?.[1]) return qeMatch[1].trim();
-
-  // Try any Exception line
-  const anyMatch = /Exception:\s*(.+?)(?:\r?\n|$)/.exec(body);
-  if (anyMatch?.[1]) return anyMatch[1].trim();
-
-  // Fall back to first 200 chars
-  return body.slice(0, 200).trim();
+  // Prefer specific exception types, then fall back to any Exception, then raw body
+  const match =
+    /MalformedQueryException:\s*(.+?)(?:\r?\n|$)/.exec(body) ??
+    /QueryEvaluationException:\s*(.+?)(?:\r?\n|$)/.exec(body) ??
+    /Exception:\s*(.+?)(?:\r?\n|$)/.exec(body);
+  return match?.[1]?.trim() ?? body.slice(0, 200).trim();
 }
 
 export class WikidataSparqlService {
@@ -111,8 +106,11 @@ export class WikidataSparqlService {
             const body = await response.text().catch(() => '');
             if (response.status === 400 || response.status === 422) {
               const cause = extractSparqlError(body);
-              const { invalidParams } = await import('@cyanheads/mcp-ts-core/errors');
-              throw invalidParams(`SPARQL parse error: ${cause}`, { reason: 'parse_error', cause });
+              const { validationError } = await import('@cyanheads/mcp-ts-core/errors');
+              throw validationError(`SPARQL parse error: ${cause}`, {
+                reason: 'parse_error',
+                cause,
+              });
             }
             const { serviceUnavailable } = await import('@cyanheads/mcp-ts-core/errors');
             throw serviceUnavailable(`Wikidata SPARQL endpoint returned HTTP ${response.status}.`, {
@@ -121,7 +119,7 @@ export class WikidataSparqlService {
           }
 
           const text = await response.text();
-          if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
+          if (isHtmlResponse(text)) {
             const { serviceUnavailable } = await import('@cyanheads/mcp-ts-core/errors');
             throw serviceUnavailable(
               'SPARQL endpoint returned HTML — likely rate-limited or under maintenance.',
@@ -164,17 +162,16 @@ export class WikidataSparqlService {
     // Inject label SERVICE if language is set and the SERVICE block is absent
     const hasLabelService = /SERVICE\s+wikibase:label/i.test(query);
     if (language && !hasLabelService) {
-      // Insert before the final } — then re-attach any trailing LIMIT/OFFSET/ORDER BY/GROUP BY/HAVING.
-      // The original /\}\s*$/ only matched when } was the last character, so queries ending with
-      // LIMIT N (or other solution modifiers) silently skipped injection.
+      // Insert before the final } — then re-attach any trailing solution modifiers
+      // (LIMIT/OFFSET/ORDER BY/GROUP BY/HAVING). The tail capture is optional so this
+      // single pattern handles both cases: modifiers present and not present.
       query = query.replace(
-        /(\})\s*((?:(?:LIMIT|OFFSET|ORDER\s+BY|GROUP\s+BY|HAVING)\b)[\s\S]*)$/i,
-        (_, brace, tail) => `  ${LABEL_SERVICE_SNIPPET(language)}\n${brace}\n${tail.trimStart()}`,
+        /(\})\s*((?:(?:LIMIT|OFFSET|ORDER\s+BY|GROUP\s+BY|HAVING)\b)[\s\S]*)?$/i,
+        (_, brace, tail) =>
+          tail?.trim()
+            ? `  ${LABEL_SERVICE_SNIPPET(language)}\n${brace}\n${tail.trimStart()}`
+            : `  ${LABEL_SERVICE_SNIPPET(language)}\n${brace}`,
       );
-      // Fallback: if no trailing modifier was found, the original pattern still applies
-      if (!query.includes(LABEL_SERVICE_SNIPPET(language))) {
-        query = query.replace(/\}\s*$/, `  ${LABEL_SERVICE_SNIPPET(language)}\n}`);
-      }
     }
 
     // Prepend standard prefixes (only those not already declared)

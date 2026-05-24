@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.7](changelog/0.1.x/0.1.7.md) — 2026-05-24
+
+Bug fix: external-id/url statement types preserved in StatementValue union; code simplification; error codes corrected to ValidationError; mcp-ts-core ^0.9.7 → ^0.9.9
+
 ## [0.1.6](changelog/0.1.x/0.1.6.md) — 2026-05-24
 
 Three field-test bug fixes: SPARQL label SERVICE injection with LIMIT, empty search descriptions, 400 from out-of-range IDs

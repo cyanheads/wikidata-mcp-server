@@ -72,7 +72,7 @@ describe('wikidataSparqlQuery', () => {
     const input = wikidataSparqlQuery.input.parse({ query: 'INVALID SPARQL' });
     await expect(wikidataSparqlQuery.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'parse_error' },
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
     });
   });
 
