@@ -4,7 +4,7 @@
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { invalidParams, notFound } from '@cyanheads/mcp-ts-core/errors';
+import { notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
 import {
   getWikidataRestService,
   isPId,
@@ -27,7 +27,7 @@ export const wikidataEntityResource = resource('wikidata://entity/{id}', {
     const id = normalizeId(params.id);
 
     if (!isQId(id) && !isPId(id)) {
-      throw invalidParams(
+      throw validationError(
         `"${params.id}" is not a valid Wikidata ID. Expected Q+digits (e.g., Q76) or P+digits (e.g., P31).`,
         { id: params.id },
       );

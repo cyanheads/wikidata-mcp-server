@@ -28,6 +28,9 @@ await createApp({
   ],
   resources: [wikidataEntityResource],
   prompts: [],
+  // Public hosted-catalog server — serve full inventory to unauthenticated callers
+  // even when MCP_AUTH_MODE is jwt/oauth (0.9.13: default flipped to require auth).
+  landing: { requireAuth: false },
   setup(core) {
     initWikidataRestService(core.config, core.storage);
     initWikidataSparqlService(core.config, core.storage);

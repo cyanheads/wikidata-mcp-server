@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: wikidata-mcp-server
+abstract: "Model Context Protocol (MCP) server for Wikidata, providing entity search, SPARQL queries, statement retrieval, sitelinks, and external ID resolution."
+type: software
+authors:
+  - family-names: Hand
+    given-names: Casey
+    orcid: "https://orcid.org/0009-0009-3726-568X"
+repository-code: "https://github.com/cyanheads/wikidata-mcp-server"
+license: Apache-2.0
+keywords:
+  - mcp
+  - model-context-protocol
+  - wikidata
+  - knowledge-graph
+  - sparql
+  - linked-data

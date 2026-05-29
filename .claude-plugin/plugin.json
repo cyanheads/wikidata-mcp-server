@@ -1,0 +1,20 @@
+{
+  "name": "@cyanheads/wikidata-mcp-server",
+  "version": "0.1.8",
+  "description": "Search and fetch Wikidata entities, execute SPARQL queries, and resolve external identifiers via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/wikidata-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/wikidata-mcp-server",
+  "license": "Apache-2.0",
+  "mcpServers": {
+    "@cyanheads/wikidata-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "@cyanheads/wikidata-mcp-server"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}
