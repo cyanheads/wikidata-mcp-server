@@ -59,7 +59,6 @@ export const wikidataSparqlQuery = tool('wikidata_sparql_query', {
         'Array of result bindings. Each row maps variable names to binding objects with { type, value, "xml:lang"?, datatype? } fields.',
       ),
     variables: z.array(z.string()).describe('Variable names returned by the SELECT clause.'),
-    rowCount: z.number().describe('Number of result rows.'),
     truncated: z
       .boolean()
       .describe(
@@ -67,6 +66,18 @@ export const wikidataSparqlQuery = tool('wikidata_sparql_query', {
           'False when the full result was returned. Add a LIMIT clause to avoid truncation on large queries.',
       ),
   }),
+
+  // Agent-facing query context — row count and empty-result guidance. Reaches both
+  // structuredContent and content[] without consuming a format() entry.
+  enrichment: {
+    totalCount: z.number().describe('Number of result rows returned.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Recovery hint when no results returned — suggests checking query logic or broadening filters. Absent on non-empty results.',
+      ),
+  },
 
   errors: [
     {
@@ -129,26 +140,29 @@ export const wikidataSparqlQuery = tool('wikidata_sparql_query', {
     const bindings = response.results.bindings;
     const variables = response.head.vars;
 
+    ctx.enrich.total(bindings.length);
+    if (bindings.length === 0) {
+      ctx.enrich.notice('No results returned. Check query logic or broaden filters.');
+    }
+
     return {
       results: bindings as Array<Record<string, Record<string, unknown>>>,
       variables,
-      rowCount: bindings.length,
       truncated: false,
     };
   },
 
   format: (result) => {
     const lines: string[] = [
-      `**Variables:** ${result.variables.join(', ')} | **Rows:** ${result.rowCount} | **Truncated:** ${result.truncated}`,
+      `**Variables:** ${result.variables.join(', ')} | **Truncated:** ${result.truncated}`,
     ];
 
-    if (result.rowCount === 0) {
-      lines.push('\n> No results returned. Check query logic or broaden filters.');
+    if (result.results.length === 0) {
       return [{ type: 'text', text: lines.join('\n') }];
     }
 
     // Render as a simple table (first 20 rows)
-    const cap = Math.min(result.rowCount, 20);
+    const cap = Math.min(result.results.length, 20);
     const header = result.variables.join(' | ');
     const separator = result.variables.map(() => '---').join(' | ');
     lines.push('');
@@ -174,8 +188,8 @@ export const wikidataSparqlQuery = tool('wikidata_sparql_query', {
       lines.push(`| ${row.join(' | ')} |`);
     }
 
-    if (result.rowCount > 20) {
-      lines.push(`\n… ${result.rowCount - 20} more rows not shown.`);
+    if (result.results.length > 20) {
+      lines.push(`\n… ${result.results.length - 20} more rows not shown.`);
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

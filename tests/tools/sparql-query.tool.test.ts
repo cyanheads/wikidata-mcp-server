@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataSparqlQuery } from '@/mcp-server/tools/definitions/sparql-query.tool.js';
 
@@ -40,13 +40,16 @@ describe('wikidataSparqlQuery', () => {
     });
     const result = await wikidataSparqlQuery.handler(input, ctx);
 
-    expect(result.rowCount).toBe(1);
     expect(result.variables).toEqual(['item', 'itemLabel']);
     expect(result.truncated).toBe(false);
     expect(result.results[0]!.item).toBeDefined();
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalCount).toBe(1);
+    expect(enrichment.notice).toBeUndefined();
   });
 
-  it('returns empty results for a query with no matches', async () => {
+  it('returns empty results and emits a notice enrichment for a query with no matches', async () => {
     mockQuery.mockResolvedValue({
       head: { vars: ['item'] },
       results: { bindings: [] },
@@ -58,8 +61,12 @@ describe('wikidataSparqlQuery', () => {
     });
     const result = await wikidataSparqlQuery.handler(input, ctx);
 
-    expect(result.rowCount).toBe(0);
     expect(result.results).toHaveLength(0);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalCount).toBe(0);
+    expect(enrichment.notice).toBeDefined();
+    expect(enrichment.notice).toContain('No results');
   });
 
   it('throws parse_error when service signals a parse failure', async () => {
@@ -121,25 +128,22 @@ describe('wikidataSparqlQuery', () => {
         },
       ],
       variables: ['item', 'itemLabel'],
-      rowCount: 1,
       truncated: false,
     };
     const blocks = wikidataSparqlQuery.format!(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('item');
     expect(text).toContain('itemLabel');
-    expect(text).toContain('1');
   });
 
-  it('formats empty results with a hint', () => {
+  it('formats empty results', () => {
     const output = {
       results: [],
       variables: ['item'],
-      rowCount: 0,
       truncated: false,
     };
     const blocks = wikidataSparqlQuery.format!(output);
     const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('No results');
+    expect(text).toContain('item');
   });
 });

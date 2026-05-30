@@ -4,7 +4,6 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getWikidataRestService } from '@/services/wikidata/wikidata-rest-service.js';
 
 export const wikidataSearchEntities = tool('wikidata_search_entities', {
@@ -78,26 +77,22 @@ export const wikidataSearchEntities = tool('wikidata_search_entities', {
           ),
       )
       .describe('Ranked list of matching entities. Empty when no results found.'),
-    query: z.string().describe('The search query that was executed.'),
-    type: z.string().describe('The entity type that was searched ("item" or "property").'),
+  }),
+
+  // Agent-facing search context — the query as executed, type, language, pagination counts,
+  // and recovery guidance for empty results. Reaches both structuredContent and content[].
+  enrichment: {
+    effectiveQuery: z.string().describe('The search query that was executed.'),
+    searchType: z.string().describe('The entity type that was searched ("item" or "property").'),
     language: z.string().describe('The language used for label and description display.'),
-    message: z
+    resultCount: z.number().describe('Number of results returned on this page.'),
+    notice: z
       .string()
       .optional()
       .describe(
-        'Recovery hint when results are empty — suggests how to broaden the query. Absent when results are present.',
+        'Recovery hint when results are empty — echoes filters and suggests how to broaden. Absent when results are present.',
       ),
-  }),
-
-  errors: [
-    {
-      reason: 'no_results',
-      code: JsonRpcErrorCode.NotFound,
-      when: 'Search query returned zero matches.',
-      recovery:
-        'Try broader terms, alternate spellings, or switch between "item" and "property" types.',
-    },
-  ],
+  },
 
   async handler(input, ctx) {
     const svc = getWikidataRestService();
@@ -128,28 +123,24 @@ export const wikidataSearchEntities = tool('wikidata_search_entities', {
       },
     }));
 
+    ctx.enrich({
+      effectiveQuery: input.query,
+      searchType: input.type,
+      language: input.language,
+      resultCount: results.length,
+    });
+
     if (results.length === 0) {
-      return {
-        results: [],
-        query: input.query,
-        type: input.type,
-        language: input.language,
-        message: `No ${input.type}s matched "${input.query}" in language "${input.language}". Try broader terms or a different language code.`,
-      };
+      ctx.enrich.notice(
+        `No ${input.type}s matched "${input.query}" in language "${input.language}". Try broader terms or a different language code.`,
+      );
     }
 
-    return { results, query: input.query, type: input.type, language: input.language };
+    return { results };
   },
 
   format: (result) => {
-    const lines: string[] = [
-      `**Query:** ${result.query} | **Type:** ${result.type} | **Language:** ${result.language}`,
-      `**Results:** ${result.results.length}`,
-    ];
-
-    if (result.message) {
-      lines.push(`\n> ${result.message}`);
-    }
+    const lines: string[] = [`**Results:** ${result.results.length}`];
 
     for (const item of result.results) {
       lines.push('');

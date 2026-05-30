@@ -3,7 +3,7 @@
  * @module tests/tools/search-entities.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataSearchEntities } from '@/mcp-server/tools/definitions/search-entities.tool.js';
 
@@ -37,12 +37,16 @@ describe('wikidataSearchEntities', () => {
     expect(result.results[0]!.label).toBe('Barack Obama');
     expect(result.results[0]!.description).toBe('44th U.S. President');
     expect(result.results[0]!.match.type).toBe('label');
-    expect(result.query).toBe('Barack Obama');
-    expect(result.type).toBe('item');
-    expect(result.language).toBe('en');
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.effectiveQuery).toBe('Barack Obama');
+    expect(enrichment.searchType).toBe('item');
+    expect(enrichment.language).toBe('en');
+    expect(enrichment.resultCount).toBe(1);
+    expect(enrichment.notice).toBeUndefined();
   });
 
-  it('returns empty results with a message when no matches found', async () => {
+  it('returns empty results with a notice enrichment when no matches found', async () => {
     mockSearch.mockResolvedValue([]);
 
     const ctx = createMockContext({ errors: wikidataSearchEntities.errors });
@@ -50,8 +54,11 @@ describe('wikidataSearchEntities', () => {
     const result = await wikidataSearchEntities.handler(input, ctx);
 
     expect(result.results).toHaveLength(0);
-    expect(result.message).toBeDefined();
-    expect(result.message).toContain('xyzzy-nonexistent-term');
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toBeDefined();
+    expect(enrichment.notice).toContain('xyzzy-nonexistent-term');
+    expect(enrichment.resultCount).toBe(0);
   });
 
   it('supports property search type', async () => {
@@ -71,8 +78,10 @@ describe('wikidataSearchEntities', () => {
     const input = wikidataSearchEntities.input.parse({ query: 'instance of', type: 'property' });
     const result = await wikidataSearchEntities.handler(input, ctx);
 
-    expect(result.type).toBe('property');
     expect(result.results[0]!.id).toBe('P31');
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.searchType).toBe('property');
   });
 
   it('handles sparse search result (missing optional fields)', async () => {
@@ -102,28 +111,18 @@ describe('wikidataSearchEntities', () => {
           match: { type: 'label', language: 'en' },
         },
       ],
-      query: 'Barack Obama',
-      type: 'item',
-      language: 'en',
     };
     const blocks = wikidataSearchEntities.format!(output);
     expect(blocks[0]!.type).toBe('text');
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('Q76');
     expect(text).toContain('Barack Obama');
-    expect(text).toContain('Barack Obama'); // query
   });
 
-  it('formats empty results with message', () => {
-    const output = {
-      results: [],
-      query: 'nothing',
-      type: 'item',
-      language: 'en',
-      message: 'No items matched "nothing".',
-    };
+  it('formats empty results list', () => {
+    const output = { results: [] };
     const blocks = wikidataSearchEntities.format!(output);
     const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('nothing');
+    expect(text).toContain('0');
   });
 });

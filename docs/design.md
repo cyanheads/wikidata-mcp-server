@@ -187,8 +187,7 @@ Raw SPARQL forwarded to the endpoint. Hard 60s server timeout; default client ti
 
 **Output:** `{ results: Array<{ id, label, description, match }> }` where `match` conveys whether it was a label or alias match and in which language. The API returns no total count — pagination is offset-only with no result ceiling indicator.
 
-**Errors:**
-- `no_results` (`NotFound`): query returned zero matches — try broader terms or alternate spelling
+**Enrichment:** `effectiveQuery`, `searchType`, `language`, `resultCount` (always); `notice` (empty-result guidance when `results` is empty).
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
