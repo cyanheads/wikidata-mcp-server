@@ -12,14 +12,14 @@
       "url": "https://wikidata.caseyjhand.com/mcp"
     }
   ],
-  "version": "0.1.8",
+  "version": "0.1.9",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/wikidata-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.8",
+      "version": "0.1.9",
       "packageArguments": [
         {
           "type": "positional",
@@ -69,7 +69,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/wikidata-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.8",
+      "version": "0.1.9",
       "packageArguments": [
         {
           "type": "positional",
