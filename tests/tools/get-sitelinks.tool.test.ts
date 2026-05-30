@@ -123,4 +123,105 @@ describe('wikidataGetSitelinks', () => {
     expect(text).toContain('enwiki');
     expect(text).toContain('Barack Obama');
   });
+
+  it('wikis_only filter: returns empty result with message when no Wikipedia links exist', async () => {
+    mockFetchSitelinks.mockResolvedValue({
+      enwikisource: {
+        title: 'Barack Obama speeches',
+        url: 'https://en.wikisource.org/wiki/Barack_Obama',
+      },
+    });
+
+    const ctx = createMockContext({ errors: wikidataGetSitelinks.errors });
+    const input = wikidataGetSitelinks.input.parse({ id: 'Q76', wikis_only: true });
+    const result = await wikidataGetSitelinks.handler(input, ctx);
+
+    expect(result.count).toBe(0);
+    expect(result.message).toContain('wikis_only');
+  });
+
+  it('returns message when sites filter matches nothing', async () => {
+    mockFetchSitelinks.mockResolvedValue({});
+
+    const ctx = createMockContext({ errors: wikidataGetSitelinks.errors });
+    const input = wikidataGetSitelinks.input.parse({ id: 'Q76', sites: ['zwwiki'] });
+    const result = await wikidataGetSitelinks.handler(input, ctx);
+
+    expect(result.count).toBe(0);
+    expect(result.message).toBeDefined();
+    expect(result.message).toContain('zwwiki');
+  });
+
+  it('format: includes badge QIDs when present', () => {
+    const output = {
+      id: 'Q76',
+      sitelinks: {
+        enwiki: {
+          title: 'Barack Obama',
+          url: 'https://en.wikipedia.org/wiki/Barack_Obama',
+          badges: ['Q17437798'],
+        },
+      },
+      count: 1,
+    };
+    const blocks = wikidataGetSitelinks.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('Q17437798');
+  });
+
+  it('format: constructs fallback URL when url is absent', () => {
+    const output = {
+      id: 'Q76',
+      sitelinks: {
+        frwiki: { title: 'Barack Obama' }, // no url
+      },
+      count: 1,
+    };
+    const blocks = wikidataGetSitelinks.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    // Falls back to constructed URL from site code
+    expect(text).toContain('frwiki');
+    expect(text).toContain('Barack Obama');
+  });
+
+  it('re-throws non-404 service errors', async () => {
+    mockFetchSitelinks.mockRejectedValue(new Error('Connection refused'));
+
+    const ctx = createMockContext({ errors: wikidataGetSitelinks.errors });
+    const input = wikidataGetSitelinks.input.parse({ id: 'Q76' });
+    await expect(wikidataGetSitelinks.handler(input, ctx)).rejects.toThrow('Connection refused');
+  });
+
+  it('security: P-ID injection attempt is rejected as not_an_item', async () => {
+    const ctx = createMockContext({ errors: wikidataGetSitelinks.errors });
+    const input = wikidataGetSitelinks.input.parse({ id: 'P31' });
+    await expect(wikidataGetSitelinks.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'not_an_item' },
+    });
+    expect(mockFetchSitelinks).not.toHaveBeenCalled();
+  });
+
+  it('security: malformed ID is rejected as not_an_item', async () => {
+    const ctx = createMockContext({ errors: wikidataGetSitelinks.errors });
+    const input = wikidataGetSitelinks.input.parse({ id: 'notanid' });
+    await expect(wikidataGetSitelinks.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'not_an_item' },
+    });
+    expect(mockFetchSitelinks).not.toHaveBeenCalled();
+  });
+
+  it('security: no env secret appears in sitelinks output', async () => {
+    process.env['TEST_SITE_SECRET'] = 'site_secret_jkl654';
+    mockFetchSitelinks.mockResolvedValue({
+      enwiki: { title: 'Barack Obama', url: 'https://en.wikipedia.org/wiki/Barack_Obama' },
+    });
+
+    const ctx = createMockContext({ errors: wikidataGetSitelinks.errors });
+    const input = wikidataGetSitelinks.input.parse({ id: 'Q76' });
+    const result = await wikidataGetSitelinks.handler(input, ctx);
+
+    const resultStr = JSON.stringify(result);
+    expect(resultStr).not.toContain('site_secret_jkl654');
+    delete process.env['TEST_SITE_SECRET'];
+  });
 });

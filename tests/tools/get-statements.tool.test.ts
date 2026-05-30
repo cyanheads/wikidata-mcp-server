@@ -145,4 +145,90 @@ describe('wikidataGetStatements', () => {
     expect(text).toContain('1');
     expect(text).toContain('true');
   });
+
+  it('throws entity_not_found for 400 HTTP status (out-of-range ID)', async () => {
+    mockFetchStatements.mockRejectedValue({ data: { statusCode: 400 } });
+
+    const ctx = createMockContext({ errors: wikidataGetStatements.errors });
+    const input = wikidataGetStatements.input.parse({ id: 'Q9999999999' });
+    await expect(wikidataGetStatements.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'entity_not_found' },
+    });
+  });
+
+  it('re-throws non-404/400 service errors', async () => {
+    mockFetchStatements.mockRejectedValue(new Error('Service timeout'));
+
+    const ctx = createMockContext({ errors: wikidataGetStatements.errors });
+    const input = wikidataGetStatements.input.parse({ id: 'Q76', resolve_labels: false });
+    await expect(wikidataGetStatements.handler(input, ctx)).rejects.toThrow('Service timeout');
+  });
+
+  it('format: preferred-rank statement includes star indicator', () => {
+    const output = {
+      id: 'Q76',
+      statements: {
+        P569: [
+          {
+            id: 'stmt2',
+            rank: 'preferred',
+            property: 'P569',
+            value: { type: 'time', time: '+1961-08-04T00:00:00Z' },
+          },
+        ],
+      },
+      propertyCount: 1,
+      statementCount: 1,
+      labelsResolved: false,
+    };
+    const blocks = wikidataGetStatements.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('★');
+    expect(text).toContain('+1961-08-04T00:00:00Z');
+  });
+
+  it('format: deprecated-rank statement includes strikethrough indicator', () => {
+    const output = {
+      id: 'Q76',
+      statements: {
+        P569: [
+          {
+            id: 'stmt3',
+            rank: 'deprecated',
+            property: 'P569',
+            value: { type: 'time', time: '+1960-01-01T00:00:00Z' },
+          },
+        ],
+      },
+      propertyCount: 1,
+      statementCount: 1,
+      labelsResolved: false,
+    };
+    const blocks = wikidataGetStatements.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('deprecated');
+  });
+
+  it('security: injection attempt in ID is rejected as invalid', async () => {
+    const ctx = createMockContext({ errors: wikidataGetStatements.errors });
+    const input = wikidataGetStatements.input.parse({ id: '"; rm -rf / --' });
+    await expect(wikidataGetStatements.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_id' },
+    });
+    expect(mockFetchStatements).not.toHaveBeenCalled();
+  });
+
+  it('security: no env secret appears in statements output', async () => {
+    process.env['TEST_STMT_SECRET'] = 'stmt_secret_ghi321';
+    mockFetchStatements.mockResolvedValue({});
+    mockNormalizeStatements.mockReturnValue([]);
+
+    const ctx = createMockContext({ errors: wikidataGetStatements.errors });
+    const input = wikidataGetStatements.input.parse({ id: 'Q1', resolve_labels: false });
+    const result = await wikidataGetStatements.handler(input, ctx);
+
+    const resultStr = JSON.stringify(result);
+    expect(resultStr).not.toContain('stmt_secret_ghi321');
+    delete process.env['TEST_STMT_SECRET'];
+  });
 });

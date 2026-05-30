@@ -125,4 +125,63 @@ describe('wikidataSearchEntities', () => {
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('0');
   });
+
+  it('pagination: offset and limit are forwarded to service', async () => {
+    mockSearch.mockResolvedValue([]);
+
+    const ctx = createMockContext({ errors: wikidataSearchEntities.errors });
+    const input = wikidataSearchEntities.input.parse({ query: 'test', limit: 20, offset: 40 });
+    await wikidataSearchEntities.handler(input, ctx);
+
+    expect(mockSearch).toHaveBeenCalledWith('test', 'item', 'en', 20, 40, expect.anything());
+  });
+
+  it('input validation: limit above maximum (51) is rejected by Zod', () => {
+    expect(() => wikidataSearchEntities.input.parse({ query: 'test', limit: 51 })).toThrow();
+  });
+
+  it('input validation: limit below minimum (0) is rejected by Zod', () => {
+    expect(() => wikidataSearchEntities.input.parse({ query: 'test', limit: 0 })).toThrow();
+  });
+
+  it('input validation: negative offset is rejected by Zod', () => {
+    expect(() => wikidataSearchEntities.input.parse({ query: 'test', offset: -1 })).toThrow();
+  });
+
+  it('input validation: empty query is rejected by Zod', () => {
+    expect(() => wikidataSearchEntities.input.parse({ query: '' })).toThrow();
+  });
+
+  it('security: no env secret appears in search result output', async () => {
+    process.env['TEST_SEARCH_SECRET'] = 'search_secret_xyz789';
+    mockSearch.mockResolvedValue([
+      {
+        id: 'Q76',
+        'display-label': { language: 'en', value: 'Barack Obama' },
+        description: { language: 'en', value: '44th U.S. President' },
+        match: { type: 'label', language: 'en' },
+      },
+    ]);
+
+    const ctx = createMockContext({ errors: wikidataSearchEntities.errors });
+    const input = wikidataSearchEntities.input.parse({ query: 'Barack Obama' });
+    const result = await wikidataSearchEntities.handler(input, ctx);
+
+    const resultStr = JSON.stringify(result);
+    expect(resultStr).not.toContain('search_secret_xyz789');
+    delete process.env['TEST_SEARCH_SECRET'];
+  });
+
+  it('security: injection attempt in query is forwarded as-is and not re-executed', async () => {
+    mockSearch.mockResolvedValue([]);
+
+    const ctx = createMockContext({ errors: wikidataSearchEntities.errors });
+    const injection = "<script>alert('xss')</script>";
+    const input = wikidataSearchEntities.input.parse({ query: injection });
+    const result = await wikidataSearchEntities.handler(input, ctx);
+
+    // Handler should not crash and result should be empty
+    expect(result.results).toHaveLength(0);
+    expect(mockSearch).toHaveBeenCalledWith(injection, 'item', 'en', 10, 0, expect.anything());
+  });
 });

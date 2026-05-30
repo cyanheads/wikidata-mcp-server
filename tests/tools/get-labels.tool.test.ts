@@ -130,4 +130,64 @@ describe('wikidataGetLabels', () => {
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('Q999999');
   });
+
+  it('input validation: empty ids array is rejected by Zod', () => {
+    expect(() => wikidataGetLabels.input.parse({ ids: [] })).toThrow();
+  });
+
+  it('input validation: too many IDs (51) is rejected by Zod', () => {
+    const ids = Array.from({ length: 51 }, (_, i) => `Q${i + 1}`);
+    expect(() => wikidataGetLabels.input.parse({ ids })).toThrow();
+  });
+
+  it('input validation: all IDs valid at max batch size (50)', () => {
+    const ids = Array.from({ length: 50 }, (_, i) => `Q${i + 1}`);
+    expect(() => wikidataGetLabels.input.parse({ ids })).not.toThrow();
+  });
+
+  it('normalizes lowercase IDs before validation', async () => {
+    mockFetchLabels.mockResolvedValue({
+      Q76: { labels: { en: 'Barack Obama' }, descriptions: {} },
+    });
+
+    const ctx = createMockContext({ errors: wikidataGetLabels.errors });
+    // normalizeId is mocked to uppercase
+    const input = wikidataGetLabels.input.parse({ ids: ['q76'] });
+    const result = await wikidataGetLabels.handler(input, ctx);
+
+    expect(result.found).toBe(1);
+    expect(mockFetchLabels).toHaveBeenCalledWith(['Q76'], ['en'], expect.anything());
+  });
+
+  it('security: injection attempt in IDs array is rejected as invalid', async () => {
+    const ctx = createMockContext({ errors: wikidataGetLabels.errors });
+    const input = wikidataGetLabels.input.parse({ ids: ['Q76', '"; DROP TABLE; --'] });
+    await expect(wikidataGetLabels.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_ids' },
+    });
+    expect(mockFetchLabels).not.toHaveBeenCalled();
+  });
+
+  it('security: no env secret appears in labels output', async () => {
+    process.env['TEST_LABELS_SECRET'] = 'labels_secret_def456';
+    mockFetchLabels.mockResolvedValue({
+      Q76: { labels: { en: 'Barack Obama' }, descriptions: { en: '44th President' } },
+    });
+
+    const ctx = createMockContext({ errors: wikidataGetLabels.errors });
+    const input = wikidataGetLabels.input.parse({ ids: ['Q76'] });
+    const result = await wikidataGetLabels.handler(input, ctx);
+
+    const resultStr = JSON.stringify(result);
+    expect(resultStr).not.toContain('labels_secret_def456');
+    delete process.env['TEST_LABELS_SECRET'];
+  });
+
+  it('re-throws non-validation service errors', async () => {
+    mockFetchLabels.mockRejectedValue(new Error('API rate limit'));
+
+    const ctx = createMockContext({ errors: wikidataGetLabels.errors });
+    const input = wikidataGetLabels.input.parse({ ids: ['Q76'] });
+    await expect(wikidataGetLabels.handler(input, ctx)).rejects.toThrow('API rate limit');
+  });
 });
