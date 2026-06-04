@@ -100,7 +100,7 @@ describe('wikidataGetStatements', () => {
   });
 
   it('throws entity_not_found when service returns 404', async () => {
-    mockFetchStatements.mockRejectedValue({ data: { statusCode: 404 } });
+    mockFetchStatements.mockRejectedValue({ data: { status: 404 } });
 
     const ctx = createMockContext({ errors: wikidataGetStatements.errors });
     const input = wikidataGetStatements.input.parse({ id: 'Q99999' });
@@ -147,7 +147,7 @@ describe('wikidataGetStatements', () => {
   });
 
   it('throws entity_not_found for 400 HTTP status (out-of-range ID)', async () => {
-    mockFetchStatements.mockRejectedValue({ data: { statusCode: 400 } });
+    mockFetchStatements.mockRejectedValue({ data: { status: 400 } });
 
     const ctx = createMockContext({ errors: wikidataGetStatements.errors });
     const input = wikidataGetStatements.input.parse({ id: 'Q9999999999' });

@@ -40,8 +40,9 @@ export const wikidataEntityResource = resource('wikidata://entity/{id}', {
     try {
       entity = await svc.fetchEntity(id, ctx);
     } catch (err) {
-      const e = err as { data?: { statusCode?: number }; code?: number };
-      if (e?.data?.statusCode === 404) {
+      const errorData = (err as { data?: { status?: number; statusCode?: number }; code?: number })?.data;
+      const httpStatus = errorData?.status ?? errorData?.statusCode;
+      if (httpStatus === 404 || httpStatus === 400) {
         throw notFound(`No Wikidata entity found for ID "${id}".`, { id }, { cause: err as Error });
       }
       throw err;

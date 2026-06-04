@@ -136,7 +136,7 @@ describe('wikidataEntityResource', () => {
   });
 
   it('throws NotFound when the entity does not exist (404)', async () => {
-    mockFetchEntity.mockRejectedValue({ data: { statusCode: 404 } });
+    mockFetchEntity.mockRejectedValue({ data: { status: 404 } });
 
     const ctx = createMockContext({ uri: new URL('wikidata://entity/Q99999999') });
     await expect(wikidataEntityResource.handler({ id: 'Q99999999' }, ctx)).rejects.toMatchObject({
@@ -144,7 +144,16 @@ describe('wikidataEntityResource', () => {
     });
   });
 
-  it('re-throws non-404 service errors', async () => {
+  it('throws NotFound for out-of-range entity IDs (400)', async () => {
+    mockFetchEntity.mockRejectedValue({ data: { status: 400 } });
+
+    const ctx = createMockContext({ uri: new URL('wikidata://entity/Q9999999999') });
+    await expect(wikidataEntityResource.handler({ id: 'Q9999999999' }, ctx)).rejects.toMatchObject({
+      message: expect.stringContaining('Q9999999999'),
+    });
+  });
+
+  it('re-throws non-404/400 service errors', async () => {
     mockFetchEntity.mockRejectedValue(new Error('Network failure'));
 
     const ctx = createMockContext({ uri: new URL('wikidata://entity/Q76') });
