@@ -91,6 +91,13 @@ describe('wikidataGetStatements', () => {
     expect(result.id).toBe('Q76');
   });
 
+  it('rejects malformed property filters before the request', () => {
+    const parsed = wikidataGetStatements.input.safeParse({ id: 'Q76', properties: ['not-a-pid'] });
+
+    expect(parsed.success).toBe(false);
+    expect(mockFetchStatements).not.toHaveBeenCalled();
+  });
+
   it('throws invalid_id for malformed ID', async () => {
     const ctx = createMockContext({ errors: wikidataGetStatements.errors });
     const input = wikidataGetStatements.input.parse({ id: 'notanid' });

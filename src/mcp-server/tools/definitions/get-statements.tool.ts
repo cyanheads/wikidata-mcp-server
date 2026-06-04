@@ -30,7 +30,12 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
       .min(1)
       .describe('Q-ID (e.g., "Q76") or P-ID of the entity to fetch statements for.'),
     properties: z
-      .array(z.string().min(1))
+      .array(
+        z
+          .string()
+          .min(1)
+          .regex(/^P\d+$/i, 'Property filters must be Wikidata P-IDs such as P31.'),
+      )
       .optional()
       .describe(
         'P-IDs to fetch (e.g., ["P31", "P569", "P27"]). Omit to return all properties (may be large for major items).',
