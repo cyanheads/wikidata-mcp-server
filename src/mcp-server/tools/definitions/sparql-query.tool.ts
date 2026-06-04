@@ -62,8 +62,9 @@ export const wikidataSparqlQuery = tool('wikidata_sparql_query', {
     truncated: z
       .boolean()
       .describe(
-        'True when the endpoint returned a partial result set due to server-side memory limits. ' +
-          'False when the full result was returned. Add a LIMIT clause to avoid truncation on large queries.',
+        'True when the row count equals 10,000 — the Wikidata/Blazegraph server-side cap — indicating ' +
+          'the result set was likely truncated. False otherwise. Add a LIMIT clause to avoid hitting the cap. ' +
+          'Note: the SPARQL endpoint does not expose an explicit truncation flag; this is an inferred signal.',
       ),
   }),
 
@@ -145,10 +146,14 @@ export const wikidataSparqlQuery = tool('wikidata_sparql_query', {
       ctx.enrich.notice('No results returned. Check query logic or broaden filters.');
     }
 
+    // Blazegraph silently caps result sets at 10,000 rows. If we hit exactly that
+    // count, the result is likely truncated — treat it as a positive signal.
+    const truncated = bindings.length >= 10_000;
+
     return {
       results: bindings as Array<Record<string, Record<string, unknown>>>,
       variables,
-      truncated: false,
+      truncated,
     };
   },
 

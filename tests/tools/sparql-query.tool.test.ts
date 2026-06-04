@@ -69,6 +69,21 @@ describe('wikidataSparqlQuery', () => {
     expect(enrichment.notice).toContain('No results');
   });
 
+  it('sets truncated=true when result count equals 10,000 (server cap)', async () => {
+    const bindings = Array.from({ length: 10_000 }, (_, i) => ({
+      item: { type: 'uri' as const, value: `http://www.wikidata.org/entity/Q${i + 1}` },
+    }));
+    mockQuery.mockResolvedValue({ head: { vars: ['item'] }, results: { bindings } });
+
+    const ctx = createMockContext({ errors: wikidataSparqlQuery.errors });
+    const input = wikidataSparqlQuery.input.parse({
+      query: 'SELECT ?item WHERE { ?item wdt:P31 wd:Q5. }',
+    });
+    const result = await wikidataSparqlQuery.handler(input, ctx);
+
+    expect(result.truncated).toBe(true);
+  });
+
   it('throws parse_error when service signals a parse failure', async () => {
     mockQuery.mockRejectedValue({
       data: { reason: 'parse_error' },
