@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.11](changelog/0.1.x/0.1.11.md) — 2026-06-04
+
+Fix entity_not_found contract never firing (err.data.statusCode → err.data.status); fix wikidata_sparql_query truncated field always false — now inferred from 10,000-row server cap
+
 ## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-06-02
 
 mcp-ts-core ^0.9.16 → ^0.9.21: per-request log context fix, secret-stripping in fetchWithTimeout, withRetry fail-fast on non-retryable errors; release:github script; skills sync (api-mirror, orchestrations, 8 updated)
