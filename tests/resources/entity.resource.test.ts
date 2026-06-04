@@ -136,7 +136,7 @@ describe('wikidataEntityResource', () => {
   });
 
   it('throws NotFound when the entity does not exist (404)', async () => {
-    mockFetchEntity.mockRejectedValue({ data: { statusCode: 404 } });
+    mockFetchEntity.mockRejectedValue({ data: { status: 404 } });
 
     const ctx = createMockContext({ uri: new URL('wikidata://entity/Q99999999') });
     await expect(wikidataEntityResource.handler({ id: 'Q99999999' }, ctx)).rejects.toMatchObject({

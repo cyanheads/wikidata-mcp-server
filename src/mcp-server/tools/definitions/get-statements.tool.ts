@@ -104,10 +104,10 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
     try {
       rawStatements = await svc.fetchStatements(id, input.properties, ctx);
     } catch (err) {
-      const statusCode = (err as { data?: { statusCode?: number } })?.data?.statusCode;
+      const status = (err as { data?: { status?: number } })?.data?.status;
       // Wikidata returns 404 for unknown IDs and 400 for syntactically valid but out-of-range IDs
       // (e.g. Q9999999999 → "invalid-path-parameter"). Both map to entity_not_found.
-      if (statusCode === 404 || statusCode === 400) {
+      if (status === 404 || status === 400) {
         throw ctx.fail('entity_not_found', `No entity found for ID "${id}".`, {
           ...ctx.recoveryFor('entity_not_found'),
         });
