@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/wikidata-mcp-server",
-  "version": "0.1.9",
+  "version": "0.1.12",
   "description": "Search and fetch Wikidata entities, execute SPARQL queries, and resolve external identifiers via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
@@ -13,7 +13,7 @@
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "wikidata", "sparql", "knowledge-graph"],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
-    "displayName": "@cyanheads/wikidata-mcp-server",
+    "displayName": "wikidata-mcp-server",
     "shortDescription": "Search and fetch Wikidata entities, execute SPARQL queries, and resolve external identifiers.",
     "longDescription": "Wikidata MCP server — search entities, fetch full entity data, resolve batch labels, traverse property statements, fetch Wikipedia sitelinks, execute SPARQL queries, and resolve external IDs (DOI, PMID, ORCID, OpenAlex, IMDb) to Wikidata QIDs.",
     "developerName": "cyanheads",
