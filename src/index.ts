@@ -17,6 +17,8 @@ import { initWikidataRestService } from './services/wikidata/wikidata-rest-servi
 import { initWikidataSparqlService } from './services/wikidata/wikidata-sparql-service.js';
 
 await createApp({
+  name: 'wikidata-mcp-server',
+  title: 'wikidata-mcp-server',
   tools: [
     wikidataSearchEntities,
     wikidataGetEntity,

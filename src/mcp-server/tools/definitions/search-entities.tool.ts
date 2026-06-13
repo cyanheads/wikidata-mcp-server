@@ -80,12 +80,19 @@ export const wikidataSearchEntities = tool('wikidata_search_entities', {
   }),
 
   // Agent-facing search context — the query as executed, type, language, pagination counts,
-  // and recovery guidance for empty results. Reaches both structuredContent and content[].
+  // truncation disclosure, and recovery guidance for empty results. Reaches both structuredContent and content[].
   enrichment: {
     effectiveQuery: z.string().describe('The search query that was executed.'),
     searchType: z.string().describe('The entity type that was searched ("item" or "property").'),
     language: z.string().describe('The language used for label and description display.'),
-    resultCount: z.number().describe('Number of results returned on this page.'),
+    shown: z.number().describe('Number of results returned on this page.'),
+    cap: z.number().describe('The limit parameter in effect.'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when results were capped at the limit. The Wikidata search API returns no total count — use offset pagination to retrieve more.',
+      ),
     notice: z
       .string()
       .optional()
@@ -123,11 +130,16 @@ export const wikidataSearchEntities = tool('wikidata_search_entities', {
       },
     }));
 
+    const atCap = results.length >= input.limit;
+    if (atCap) {
+      ctx.enrich.truncated({ shown: results.length, cap: input.limit });
+    } else {
+      ctx.enrich({ shown: results.length, cap: input.limit });
+    }
     ctx.enrich({
       effectiveQuery: input.query,
       searchType: input.type,
       language: input.language,
-      resultCount: results.length,
     });
 
     if (results.length === 0) {

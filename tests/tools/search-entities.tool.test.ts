@@ -42,7 +42,7 @@ describe('wikidataSearchEntities', () => {
     expect(enrichment.effectiveQuery).toBe('Barack Obama');
     expect(enrichment.searchType).toBe('item');
     expect(enrichment.language).toBe('en');
-    expect(enrichment.resultCount).toBe(1);
+    expect(enrichment.shown).toBe(1);
     expect(enrichment.notice).toBeUndefined();
   });
 
@@ -58,7 +58,7 @@ describe('wikidataSearchEntities', () => {
     const enrichment = getEnrichment(ctx);
     expect(enrichment.notice).toBeDefined();
     expect(enrichment.notice).toContain('xyzzy-nonexistent-term');
-    expect(enrichment.resultCount).toBe(0);
+    expect(enrichment.shown).toBe(0);
   });
 
   it('supports property search type', async () => {
