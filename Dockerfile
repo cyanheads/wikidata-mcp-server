@@ -8,7 +8,7 @@ FROM oven/bun:1.3 AS build
 
 WORKDIR /usr/src/app
 
-# Install node for tsx-based build scripts
+# Install node for npm (delegates to bun scripts)
 RUN apt-get update -qq && apt-get install -y --no-install-recommends nodejs npm && rm -rf /var/lib/apt/lists/*
 
 # Copy dependency manifests for optimized layer caching
@@ -20,7 +20,7 @@ RUN bun install --frozen-lockfile
 # Copy the rest of the source code
 COPY . .
 
-# Build the application (npm invokes node/tsx rather than bun for script runner)
+# Build the application
 RUN npm run build
 
 
@@ -39,11 +39,14 @@ WORKDIR /usr/src/app
 # production dependencies are installed.
 ENV NODE_ENV=production
 
+ARG APP_VERSION
+
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 LABEL org.opencontainers.image.title="@cyanheads/wikidata-mcp-server"
 LABEL org.opencontainers.image.description="Search and fetch Wikidata entities, execute SPARQL queries, and resolve external identifiers via MCP. STDIO or Streamable HTTP."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.source="https://github.com/cyanheads/wikidata-mcp-server"
+LABEL org.opencontainers.image.version="${APP_VERSION}"
 
 # Copy dependency manifests
 COPY package.json bun.lock ./
@@ -97,6 +100,9 @@ ENV MCP_FORCE_CONSOLE_LOGGING="true"
 
 # Expose the port the server listens on
 EXPOSE ${MCP_HTTP_PORT}
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD bun -e "fetch('http://localhost:'+process.env.MCP_HTTP_PORT+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 # The command to start the server
 CMD ["bun", "run", "dist/index.js"]
