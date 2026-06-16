@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/wikidata-mcp-server",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "mcpName": "io.github.cyanheads/wikidata-mcp-server",
   "description": "Search and fetch Wikidata entities, execute SPARQL queries, and resolve external identifiers via MCP. STDIO or Streamable HTTP.",
   "type": "module",
@@ -87,6 +87,6 @@
     "tsc-alias": "^1.8.17",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.9"
   }
 }
