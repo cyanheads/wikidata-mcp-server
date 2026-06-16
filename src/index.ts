@@ -19,6 +19,13 @@ import { initWikidataSparqlService } from './services/wikidata/wikidata-sparql-s
 await createApp({
   name: 'wikidata-mcp-server',
   title: 'wikidata-mcp-server',
+  instructions:
+    'Use the wikidata_* tools to query the Wikidata knowledge graph (REST API + Query Service). No API key required. ' +
+    'Items are addressed by Q-IDs (e.g. Q76), properties by P-IDs (e.g. P31). IDs are not names — resolve a name to an ID with ' +
+    'wikidata_search_entities first, then fetch with wikidata_get_entity, wikidata_get_statements, or wikidata_get_sitelinks. ' +
+    'Use wikidata_resolve_external_id to enter the graph from a DOI, PMID, ORCID, or OpenAlex ID. ' +
+    'wikidata_sparql_query is the escape hatch for graph traversals and aggregations the curated tools cannot express (SELECT only, rate-limited); ' +
+    'pair it with wikidata_get_labels to humanize the QIDs it returns.',
   tools: [
     wikidataSearchEntities,
     wikidataGetEntity,
