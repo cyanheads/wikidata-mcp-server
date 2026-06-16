@@ -1,5 +1,5 @@
 {
-  "@cyanheads/wikidata-mcp-server": {
+  "wikidata-mcp-server": {
     "command": "npx",
     "args": ["-y", "@cyanheads/wikidata-mcp-server"],
     "env": {
