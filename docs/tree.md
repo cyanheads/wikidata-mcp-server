@@ -1,6 +1,6 @@
 # wikidata-mcp-server - Directory Structure
 
-Generated on: 2026-06-13 04:45:18
+Generated on: 2026-06-20 18:33:15
 
 ```text
 wikidata-mcp-server/
@@ -27,6 +27,7 @@ wikidata-mcp-server/
 ├── scripts/
 │   ├── build-changelog.ts
 │   ├── build.ts
+│   ├── check-dependency-specifiers.ts
 │   ├── check-docs-sync.ts
 │   ├── check-framework-antipatterns.ts
 │   ├── check-skill-versions.ts
