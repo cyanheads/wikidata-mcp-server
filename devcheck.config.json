@@ -14,6 +14,9 @@
   "outdated": {
     "allowlist": ["@cyanheads/mcp-ts-core"]
   },
+  "packaging": {
+    "pluginManifests": true
+  },
   "skillVersions": {
     "ignore": [
       "api-auth",
