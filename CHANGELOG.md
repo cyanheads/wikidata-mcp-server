@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.16](changelog/0.1.x/0.1.16.md) — 2026-07-14
+
+wikidata_resolve_external_id rejects non-external-id properties before lookup; resolver URL prefixes and surrounding whitespace stripped/trimmed from property, value, and every id/ids parameter
+
 ## [0.1.15](changelog/0.1.x/0.1.15.md) — 2026-07-14
 
 Out-of-range entity IDs return entity_not_found instead of leaking raw REST errors; a bad batch member no longer zeroes wikidata_get_labels; mul label fallback across the REST path; format() discloses truncated language samples; mcp-ts-core ^0.10.9 → ^0.10.14
