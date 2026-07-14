@@ -8,10 +8,24 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataResolveExternalId } from '@/mcp-server/tools/definitions/resolve-external-id.tool.js';
 
 const mockQuery = vi.fn();
+const mockFetchPropertyDataType = vi.fn();
 
 vi.mock('@/services/wikidata/wikidata-sparql-service.js', () => ({
   getWikidataSparqlService: () => ({ query: mockQuery }),
 }));
+
+/**
+ * Partial mock — the handler imports `isEntityNotFoundError` from this module alongside the
+ * service accessor, and its not-found catch path depends on the real implementation.
+ */
+vi.mock('@/services/wikidata/wikidata-rest-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/wikidata/wikidata-rest-service.js')>()),
+  getWikidataRestService: () => ({ fetchPropertyDataType: mockFetchPropertyDataType }),
+}));
+
+/** A REST rejection shaped like the McpError fetchWithTimeout throws for a non-2xx. */
+const restError = (statusCode: number) =>
+  Object.assign(new Error(`HTTP ${statusCode}`), { data: { statusCode } });
 
 const successResponse = {
   head: { vars: ['item', 'itemLabel', 'itemDescription'] },
@@ -34,6 +48,8 @@ const noResultResponse = {
 describe('wikidataResolveExternalId', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Every property under test is a real external-ID property unless a case says otherwise.
+    mockFetchPropertyDataType.mockResolvedValue('external-id');
   });
 
   it('resolves a DOI to a Wikidata entity', async () => {
@@ -97,6 +113,141 @@ describe('wikidataResolveExternalId', () => {
     expect(result.value).toBe('0000-0002-1825-0097');
   });
 
+  it('strips a doi.org resolver prefix before lookup', async () => {
+    mockQuery.mockResolvedValue(successResponse);
+
+    const ctx = createMockContext({ errors: wikidataResolveExternalId.errors });
+    const input = wikidataResolveExternalId.input.parse({
+      property: 'P356',
+      value: 'https://doi.org/10.1093/anb/9780198606697.article.0401011',
+    });
+    const result = await wikidataResolveExternalId.handler(input, ctx);
+
+    expect(result.value).toBe('10.1093/ANB/9780198606697.ARTICLE.0401011');
+  });
+
+  it.each([
+    ['https://dx.doi.org/', 'https://dx.doi.org/10.1038/nature01234'],
+    ['http://doi.org/', 'http://doi.org/10.1038/nature01234'],
+    ['doi: scheme', 'doi:10.1038/nature01234'],
+  ])('strips a %s prefix from a DOI', async (_label, value) => {
+    mockQuery.mockResolvedValue(successResponse);
+
+    const ctx = createMockContext({ errors: wikidataResolveExternalId.errors });
+    const input = wikidataResolveExternalId.input.parse({ property: 'P356', value });
+    const result = await wikidataResolveExternalId.handler(input, ctx);
+
+    expect(result.value).toBe('10.1038/NATURE01234');
+  });
+
+  it('strips a pubmed.ncbi.nlm.nih.gov resolver prefix and trailing slash', async () => {
+    mockQuery.mockResolvedValue(successResponse);
+
+    const ctx = createMockContext({ errors: wikidataResolveExternalId.errors });
+    const input = wikidataResolveExternalId.input.parse({
+      property: 'P698',
+      value: 'https://pubmed.ncbi.nlm.nih.gov/12344444/',
+    });
+    const result = await wikidataResolveExternalId.handler(input, ctx);
+
+    expect(result.value).toBe('12344444');
+  });
+
+  it('strips an orcid.org resolver prefix from an already-hyphenated ORCID', async () => {
+    mockQuery.mockResolvedValue(successResponse);
+
+    const ctx = createMockContext({ errors: wikidataResolveExternalId.errors });
+    const input = wikidataResolveExternalId.input.parse({
+      property: 'P496',
+      value: 'https://orcid.org/0000-0001-5069-3018',
+    });
+    const result = await wikidataResolveExternalId.handler(input, ctx);
+
+    expect(result.value).toBe('0000-0001-5069-3018');
+  });
+
+  /**
+   * The case that pins the strip *ahead* of the switch rather than around its return value:
+   * the hyphen reformat is gated on a length-16 check that the URL text defeats, so a
+   * post-hoc strip would return this ORCID unhyphenated and never match.
+   */
+  it('hyphenates a URL-prefixed unhyphenated ORCID (strip precedes normalization)', async () => {
+    mockQuery.mockResolvedValue(successResponse);
+
+    const ctx = createMockContext({ errors: wikidataResolveExternalId.errors });
+    const input = wikidataResolveExternalId.input.parse({
+      property: 'P496',
+      value: 'https://orcid.org/0000000150693018',
+    });
+    const result = await wikidataResolveExternalId.handler(input, ctx);
+
+    expect(result.value).toBe('0000-0001-5069-3018');
+  });
+
+  it('leaves a bare identifier untouched by the resolver strip', async () => {
+    mockQuery.mockResolvedValue(successResponse);
+
+    const ctx = createMockContext({ errors: wikidataResolveExternalId.errors });
+    const input = wikidataResolveExternalId.input.parse({
+      property: 'P698',
+      value: '12344444',
+    });
+    const result = await wikidataResolveExternalId.handler(input, ctx);
+
+    expect(result.value).toBe('12344444');
+  });
+
+  /**
+   * Only P698 and P496 discard surrounding whitespace incidentally — a stray `.trim()` in the
+   * PMID chain and the `[-\s]` strip in ORCID's. Without a trim ahead of the switch, a padded
+   * DOI or IMDb ID reaches the SPARQL literal intact and answers a confident null for an
+   * identifier that resolves. Covers every branch, so the four stay consistent.
+   */
+  it.each([
+    ['P356', ' 10.1038/nature01234 ', '10.1038/NATURE01234'],
+    ['P698', ' 12344444 ', '12344444'],
+    ['P496', ' 0000-0001-5069-3018 ', '0000-0001-5069-3018'],
+    ['P345', ' tt0111161 ', 'tt0111161'],
+  ])('trims surrounding whitespace from a %s value', async (property, value, expected) => {
+    mockQuery.mockResolvedValue(successResponse);
+
+    const ctx = createMockContext({ errors: wikidataResolveExternalId.errors });
+    const input = wikidataResolveExternalId.input.parse({ property, value });
+    const result = await wikidataResolveExternalId.handler(input, ctx);
+
+    expect(result.value).toBe(expected);
+  });
+
+  it('trims a trailing newline rather than emitting it into the SPARQL literal', async () => {
+    mockQuery.mockResolvedValue(successResponse);
+
+    const ctx = createMockContext({ errors: wikidataResolveExternalId.errors });
+    const input = wikidataResolveExternalId.input.parse({
+      property: 'P356',
+      value: '10.1038/nature01234\n',
+    });
+    const result = await wikidataResolveExternalId.handler(input, ctx);
+
+    expect(result.value).toBe('10.1038/NATURE01234');
+  });
+
+  /**
+   * Pins the trim *ahead* of the resolver strip: RESOLVER_URL_PATTERNS are `^`-anchored, so a
+   * padded URL never matches and the prefix would survive into the SPARQL literal.
+   */
+  it('strips a resolver prefix from a padded URL (trim precedes strip)', async () => {
+    mockQuery.mockResolvedValue(successResponse);
+
+    const ctx = createMockContext({ errors: wikidataResolveExternalId.errors });
+    const input = wikidataResolveExternalId.input.parse({
+      property: 'P356',
+      value: '  https://doi.org/10.1038/nature01234  ',
+    });
+    const result = await wikidataResolveExternalId.handler(input, ctx);
+
+    expect(result.value).toBe('10.1038/NATURE01234');
+  });
+
   it('throws invalid_property for malformed property ID', async () => {
     const ctx = createMockContext({ errors: wikidataResolveExternalId.errors });
     const input = wikidataResolveExternalId.input.parse({
@@ -106,6 +257,71 @@ describe('wikidataResolveExternalId', () => {
     await expect(wikidataResolveExternalId.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'invalid_property' },
     });
+  });
+
+  /**
+   * The #16 defect: a well-formed P-ID of the wrong data type produced `match: null`, which
+   * reads as a genuine miss for a lookup that could never have matched.
+   */
+  it.each([
+    ['P31', 'wikibase-item'],
+    ['P1932', 'string'],
+    ['P18', 'commonsMedia'],
+  ])('rejects %s — data type %s is not external-id', async (property, dataType) => {
+    mockFetchPropertyDataType.mockResolvedValue(dataType);
+
+    const ctx = createMockContext({ errors: wikidataResolveExternalId.errors });
+    const input = wikidataResolveExternalId.input.parse({ property, value: 'Q5' });
+
+    await expect(wikidataResolveExternalId.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'not_external_id_property', dataType },
+    });
+    // Rejected before any SPARQL is built.
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['unassigned', 404],
+    ['out of range', 400],
+  ])('rejects a nonexistent property (%s → HTTP %i)', async (_label, statusCode) => {
+    mockFetchPropertyDataType.mockRejectedValue(restError(statusCode));
+
+    const ctx = createMockContext({ errors: wikidataResolveExternalId.errors });
+    const input = wikidataResolveExternalId.input.parse({
+      property: 'P9999999',
+      value: '10.1234/x',
+    });
+
+    await expect(wikidataResolveExternalId.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'not_external_id_property' },
+    });
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('re-throws a non-not-found REST error from the datatype check', async () => {
+    mockFetchPropertyDataType.mockRejectedValue(restError(503));
+
+    const ctx = createMockContext({ errors: wikidataResolveExternalId.errors });
+    const input = wikidataResolveExternalId.input.parse({
+      property: 'P356',
+      value: '10.1234/x',
+    });
+
+    await expect(wikidataResolveExternalId.handler(input, ctx)).rejects.toThrow('HTTP 503');
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('checks the datatype of the normalized P-ID, not the raw input', async () => {
+    mockQuery.mockResolvedValue(successResponse);
+
+    const ctx = createMockContext({ errors: wikidataResolveExternalId.errors });
+    const input = wikidataResolveExternalId.input.parse({
+      property: ' p356 ',
+      value: '10.1038/nature01234',
+    });
+    await wikidataResolveExternalId.handler(input, ctx);
+
+    expect(mockFetchPropertyDataType).toHaveBeenCalledWith('P356', expect.anything());
   });
 
   it('returns null match with multipleMatches when more than one entity claims the ID', async () => {
@@ -245,6 +461,22 @@ describe('wikidataResolveExternalId', () => {
     const input = wikidataResolveExternalId.input.parse({
       property: 'p356', // lowercase
       value: '10.1038/NATURE01234',
+    });
+    const result = await wikidataResolveExternalId.handler(input, ctx);
+
+    expect(result.property).toBe('P356');
+    const [calledQuery] = mockQuery.mock.calls[0] as [string, ...unknown[]];
+    expect(calledQuery).toContain('wdt:P356');
+  });
+
+  /** #21: this call site validates `property` itself rather than via normalizeId/isPId. */
+  it('trims surrounding whitespace from property', async () => {
+    mockQuery.mockResolvedValue(successResponse);
+
+    const ctx = createMockContext({ errors: wikidataResolveExternalId.errors });
+    const input = wikidataResolveExternalId.input.parse({
+      property: ' P356 ',
+      value: '10.1038/nature01234',
     });
     const result = await wikidataResolveExternalId.handler(input, ctx);
 

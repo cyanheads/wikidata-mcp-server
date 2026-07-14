@@ -11,6 +11,9 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   isEntityNotFoundError,
+  isPId,
+  isQId,
+  normalizeId,
   resolveLangValue,
   WikidataRestService,
 } from '@/services/wikidata/wikidata-rest-service.js';
@@ -285,6 +288,62 @@ describe('WikidataRestService', () => {
      */
     it('ignores the legacy data.status field', () => {
       expect(isEntityNotFoundError({ data: { status: 404 } })).toBe(false);
+    });
+  });
+
+  describe('fetchPropertyDataType', () => {
+    it('requests only data_type and returns it', async () => {
+      respondWith({ id: 'P356', data_type: 'external-id' });
+
+      const svc = makeService();
+      const dataType = await svc.fetchPropertyDataType('P356', createMockContext());
+
+      expect(dataType).toBe('external-id');
+      expect(urlOf(0)).toContain('/entities/properties/P356');
+      expect(urlOf(0)).toContain('_fields=data_type');
+    });
+
+    it('normalizes the P-ID before addressing the endpoint', async () => {
+      respondWith({ id: 'P356', data_type: 'external-id' });
+
+      const svc = makeService();
+      await svc.fetchPropertyDataType(' p356 ', createMockContext());
+
+      expect(urlOf(0)).toContain('/entities/properties/P356');
+    });
+
+    it('rejects a nonexistent property with a not-found-classifiable error', async () => {
+      respondWithStatus(404, 'Not Found', '{"code":"resource-not-found"}');
+
+      const svc = makeService();
+      const err = await svc
+        .fetchPropertyDataType('P9999999', createMockContext())
+        .catch((e: unknown) => e);
+
+      expect(isEntityNotFoundError(err)).toBe(true);
+    });
+  });
+
+  /** #21: the single point every ID-format call site inherits its trim from. */
+  describe('normalizeId', () => {
+    it.each([
+      [' Q76 ', 'Q76'],
+      ['q76', 'Q76'],
+      ['\tp31\n', 'P31'],
+      ['  Q76', 'Q76'],
+      ['Q76  ', 'Q76'],
+    ])('normalizes %j → %j', (input, expected) => {
+      expect(normalizeId(input)).toBe(expected);
+    });
+
+    it('makes a whitespace-padded ID pass the strict format check', () => {
+      expect(isQId(normalizeId(' q76 '))).toBe(true);
+      expect(isPId(normalizeId(' p31 '))).toBe(true);
+    });
+
+    it('does not rescue an ID that is malformed for other reasons', () => {
+      expect(isQId(normalizeId(' Q 76 '))).toBe(false);
+      expect(isQId(normalizeId(' notanid '))).toBe(false);
     });
   });
 

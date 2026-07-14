@@ -117,8 +117,9 @@ Execute a SPARQL SELECT query against the Wikidata Query Service (Blazegraph).
 Look up a Wikidata entity by an external identifier.
 
 - Common use cases: CrossRef DOI → QID (P356), PubMed PMID → QID (P698), ORCID → author QID (P496), OpenAlex ID → entity QID (P10283), IMDb ID (P345)
-- Automatic value normalization: DOIs uppercased, PMID prefixes stripped, ORCID hyphens normalized
-- Returns `match=null` when not found
+- Automatic value normalization: surrounding whitespace trimmed, resolver URL prefixes stripped (`https://doi.org/`, `https://pubmed.ncbi.nlm.nih.gov/`, `https://orcid.org/`), DOIs uppercased, PMID prefixes stripped, ORCID hyphens normalized
+- The property's data type must be `external-id` — item-valued or media properties (e.g. `P31`, `P18`) are rejected rather than returning an empty match
+- Returns `match=null` when not found (the Query Service lags the live wiki, so a null is not proof of absence)
 - Returns `multipleMatches` when a Wikidata data integrity issue causes more than one entity to claim the same external ID
 - Designed for cross-server joins with pubmed-mcp-server, crossref-mcp-server, and openalex-mcp-server
 

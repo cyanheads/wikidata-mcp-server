@@ -34,9 +34,16 @@ export function isPId(id: string): boolean {
   return /^[Pp]\d+$/.test(id);
 }
 
-/** Normalizes a Q/P-ID to uppercase (e.g. q76 → Q76). */
+/**
+ * Normalizes a Q/P-ID to uppercase, trimming surrounding whitespace (e.g. ` q76 ` → `Q76`).
+ *
+ * Trimming here covers every ID-format call site: the tools and the entity resource all run
+ * their `isQId`/`isPId` check on a `normalizeId()` result, so incidental whitespace no longer
+ * reaches the strict `^[QqPp]\d+$` patterns as an "invalid ID". `isQId`/`isPId` need no trim
+ * of their own — nothing calls them on a value that has not been through `normalizeId` first.
+ */
 export function normalizeId(id: string): string {
-  return id.toUpperCase();
+  return id.trim().toUpperCase();
 }
 
 /**
@@ -147,6 +154,23 @@ export class WikidataRestService {
     const url = `${REST_BASE}/${path}`;
     ctx.log.debug('Fetching entity', { id: normalized });
     return this.getJson<RawEntity>(url, ctx);
+  }
+
+  /**
+   * Fetch only a property's `data_type`.
+   *
+   * `?_fields=data_type` keeps the response to ~40 bytes; the same property fetched whole
+   * carries labels, descriptions, aliases, and statements, and runs 27–282KB — all of it dead
+   * weight for a datatype check. Not-found behavior is unchanged by the narrowing: an
+   * unassigned P-ID still answers 404 and an out-of-range one still answers 400, so callers
+   * classify both with `isEntityNotFoundError()`.
+   */
+  async fetchPropertyDataType(id: string, ctx: Context): Promise<string | undefined> {
+    const normalized = normalizeId(id);
+    const url = `${REST_BASE}/entities/properties/${normalized}?_fields=data_type`;
+    ctx.log.debug('Fetching property data type', { id: normalized });
+    const data = await this.getJson<Pick<RawEntity, 'id' | 'data_type'>>(url, ctx);
+    return data.data_type ?? undefined;
   }
 
   /** Fetch statements for an entity, optionally filtered to specific P-IDs. */

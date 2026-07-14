@@ -5,28 +5,65 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import {
+  getWikidataRestService,
+  isEntityNotFoundError,
+} from '@/services/wikidata/wikidata-rest-service.js';
 import { getWikidataSparqlService } from '@/services/wikidata/wikidata-sparql-service.js';
 
-/** Normalize a value to the canonical form Wikidata stores it in for known P-IDs. */
+/**
+ * Identifier-resolver wrappers these IDs are commonly presented in, mapped to the bare value
+ * Wikidata actually stores. CrossRef, PubMed, and citation managers all routinely render a
+ * DOI/PMID/ORCID as a resolver URL, and the URL text never matches the stored identifier.
+ *
+ * Each pattern captures the bare identifier in group 1. PubMed and ORCID absorb a trailing
+ * slash; P356 deliberately does not — a DOI suffix can legitimately end in one.
+ */
+const RESOLVER_URL_PATTERNS: Record<string, RegExp> = {
+  P356: /^(?:https?:\/\/(?:dx\.)?doi\.org\/|doi:)(.+)$/i,
+  P698: /^https?:\/\/pubmed\.ncbi\.nlm\.nih\.gov\/(.+?)\/?$/i,
+  P496: /^https?:\/\/orcid\.org\/(.+?)\/?$/i,
+};
+
+/** Strip a known identifier-resolver prefix, leaving the bare identifier. */
+function stripResolverPrefix(property: string, value: string): string {
+  return RESOLVER_URL_PATTERNS[property]?.exec(value)?.[1] ?? value;
+}
+
+/**
+ * Normalize a value to the canonical form Wikidata stores it in for known P-IDs.
+ *
+ * Both steps ahead of the switch are order-load-bearing:
+ * - The trim precedes the strip because RESOLVER_URL_PATTERNS are `^`-anchored — a padded URL
+ *   would not match, and the prefix would survive into the SPARQL literal.
+ * - The strip precedes the per-property cases because ORCID's hyphen reformat is gated on a
+ *   length-16 check that a URL-prefixed value always fails, so stripping afterwards would leave
+ *   a URL-prefixed *unhyphenated* ORCID silently unformatted.
+ *
+ * Trimming here rather than in a single branch keeps the four cases consistent: only P698 and
+ * P496 discard surrounding whitespace incidentally, so a padded DOI or IMDb ID would otherwise
+ * reach SPARQL intact and return a confident `match: null` for an identifier that resolves.
+ */
 function normalizeExternalId(property: string, value: string): string {
   const upperProp = property.toUpperCase();
+  const bare = stripResolverPrefix(upperProp, value.trim());
   switch (upperProp) {
     case 'P356':
       // DOI: stored uppercase
-      return value.toUpperCase();
+      return bare.toUpperCase();
     case 'P698':
       // PubMed ID: strip "PMID:" prefix, keep numeric
-      return value.replace(/^PMID[:\s]*/i, '').trim();
+      return bare.replace(/^PMID[:\s]*/i, '').trim();
     case 'P496': {
       // ORCID: normalize to 0000-0000-0000-000X format
-      const stripped = value.replace(/[-\s]/g, '');
+      const stripped = bare.replace(/[-\s]/g, '');
       if (stripped.length === 16) {
         return `${stripped.slice(0, 4)}-${stripped.slice(4, 8)}-${stripped.slice(8, 12)}-${stripped.slice(12)}`;
       }
-      return value;
+      return bare;
     }
     default:
-      return value;
+      return bare;
   }
 }
 
@@ -39,7 +76,12 @@ export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
     'Common cross-server join use cases: CrossRef DOI → Wikidata paper QID (P356), ' +
     'PubMed PMID → Wikidata paper QID (P698), ORCID → author QID (P496), ' +
     'OpenAlex ID → entity QID (P10283). ' +
-    'Known value normalization is applied automatically: DOIs are uppercased, PMID prefixes stripped, ORCID hyphens normalized.',
+    'The property must be one whose Wikidata data type is external-id — item-valued or media ' +
+    'properties (e.g. P31 instance-of, P18 image) are rejected rather than returning an empty match. ' +
+    'Known value normalization is applied automatically: surrounding whitespace is trimmed, ' +
+    'identifier-resolver URL prefixes are stripped ' +
+    '(https://doi.org/, https://pubmed.ncbi.nlm.nih.gov/, https://orcid.org/), ' +
+    'DOIs are uppercased, PMID prefixes stripped, ORCID hyphens normalized.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -47,15 +89,18 @@ export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
       .string()
       .min(1)
       .describe(
-        'P-ID of the external identifier property (e.g., "P356" for DOI, "P698" for PubMed ID, ' +
-          '"P496" for ORCID, "P10283" for OpenAlex ID, "P345" for IMDb ID).',
+        'P-ID of the external identifier property, whose Wikidata data type must be external-id ' +
+          '(e.g., "P356" for DOI, "P698" for PubMed ID, "P496" for ORCID, "P10283" for OpenAlex ID, ' +
+          '"P345" for IMDb ID). Properties of any other data type are rejected — check an unfamiliar ' +
+          "P-ID's data type with wikidata_get_entity.",
       ),
     value: z
       .string()
       .min(1)
       .describe(
         'The external identifier value to look up (e.g., "10.1038/nature01234" for a DOI, ' +
-          '"32283226" for a PubMed ID, "0000-0002-1825-0097" for an ORCID).',
+          '"32283226" for a PubMed ID, "0000-0002-1825-0097" for an ORCID). ' +
+          'A resolver URL is accepted for DOI, PubMed, and ORCID — the prefix is stripped before lookup.',
       ),
     language: z
       .string()
@@ -80,7 +125,9 @@ export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
       .nullable()
       .describe(
         'Matching entity, or null when no Wikidata entity claims this external identifier ' +
-          '(including the case where multipleMatches is populated).',
+          '(including the case where multipleMatches is populated). ' +
+          'A null match is not proof of absence — the Query Service backing this lookup lags the ' +
+          'live wiki, so a recently added identifier may not be indexed yet.',
       ),
     property: z.string().describe('The P-ID used for the lookup.'),
     value: z
@@ -111,15 +158,56 @@ export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
       when: 'Property ID is not in P+digits format.',
       recovery: 'Supply a valid P-ID (P followed by digits, e.g. P356 for DOI).',
     },
+    {
+      reason: 'not_external_id_property',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Property does not exist on Wikidata, or its data type is not external-id.',
+      recovery:
+        'Supply a P-ID whose data type is external-id, such as P356 (DOI), P698 (PubMed ID), P496 (ORCID), P10283 (OpenAlex ID), or P345 (IMDb ID).',
+    },
   ],
 
   async handler(input, ctx) {
-    const prop = input.property.toUpperCase();
+    // This check is bespoke rather than the service's normalizeId/isPId pair, so it carries
+    // its own trim — the format test below is strict about surrounding whitespace.
+    const prop = input.property.trim().toUpperCase();
     if (!/^P\d+$/.test(prop)) {
       throw ctx.fail(
         'invalid_property',
         `"${input.property}" is not a valid property ID. Expected P followed by digits.`,
         { ...ctx.recoveryFor('invalid_property') },
+      );
+    }
+
+    /**
+     * Reject a property that cannot carry an external identifier before spending a SPARQL
+     * call on it. `?item wdt:P31 "Q5"` is valid SPARQL that simply matches nothing, so
+     * without this the caller gets `match: null` — indistinguishable from a genuine miss —
+     * for a lookup that could never have succeeded.
+     *
+     * A missing property and a wrong-datatype one share the reason: the caller's fix is the
+     * same either way, supply a different P-ID.
+     */
+    const restSvc = getWikidataRestService();
+    let dataType: string | undefined;
+    try {
+      dataType = await restSvc.fetchPropertyDataType(prop, ctx);
+    } catch (err) {
+      if (isEntityNotFoundError(err)) {
+        throw ctx.fail(
+          'not_external_id_property',
+          `Property "${prop}" does not exist on Wikidata.`,
+          { ...ctx.recoveryFor('not_external_id_property') },
+        );
+      }
+      throw err;
+    }
+
+    if (dataType !== 'external-id') {
+      throw ctx.fail(
+        'not_external_id_property',
+        `Property ${prop} has data type "${dataType}", not "external-id", so it cannot be resolved as an external identifier.`,
+        { dataType, ...ctx.recoveryFor('not_external_id_property') },
       );
     }
 

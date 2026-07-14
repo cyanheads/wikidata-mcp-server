@@ -56,7 +56,7 @@ Read-only. No auth required.
 | Service | Wraps | Used By |
 |:--------|:------|:--------|
 | `WikidataRestService` | Wikidata REST API (`wikidata.org/w/rest.php/wikibase/v1/`) | `wikidata_search_entities`, `wikidata_get_entity`, `wikidata_get_labels`, `wikidata_get_statements`, `wikidata_get_sitelinks`, `wikidata_resolve_external_id` |
-| `WikidataSparqlService` | Wikidata Query Service (`query.wikidata.org/sparql`) | `wikidata_sparql_query` |
+| `WikidataSparqlService` | Wikidata Query Service (`query.wikidata.org/sparql`) | `wikidata_sparql_query`, `wikidata_resolve_external_id` |
 
 Both services are stateless HTTP clients with retry and timeout handling. No shared mutable state between calls.
 
@@ -115,18 +115,25 @@ Each step is independently testable.
 
 ### External ID Property Map (Key Cross-Server Joins)
 
+`data_type: external-id` — the only properties `wikidata_resolve_external_id` accepts:
+
 | P-ID | Property Name | External System |
 |:-----|:-------------|:----------------|
 | P356 | DOI | CrossRef, academic papers |
 | P698 | PubMed publication ID | PubMed |
 | P496 | ORCID iD | Author identifiers |
 | P10283 | OpenAlex ID | OpenAlex (works, authors, institutions) |
-| P2860 | cites work | citation graph |
-| P1932 | stated as (reference) | CrossRef title matching |
 | P213 | ISNI | International Standard Name Identifier |
 | P244 | Library of Congress authority ID | Libraries, archives |
 | P345 | IMDb ID | Film/TV |
-| P18 | image | Commons media |
+
+Adjacent properties with real cross-server value that are **not** external IDs. Reachable via `wikidata_get_statements` or SPARQL; `wikidata_resolve_external_id` rejects them with `not_external_id_property`:
+
+| P-ID | Property Name | Data Type | Cross-server use |
+|:-----|:-------------|:----------|:-----------------|
+| P2860 | cites work | `wikibase-item` | Citation-graph traversal — values are QIDs, not identifier strings |
+| P1932 | stated as (reference) | `string` | CrossRef title matching against a reference's as-printed name |
+| P18 | image | `commonsMedia` | Commons media filename |
 
 ---
 
@@ -158,11 +165,14 @@ Uses MediaWiki API (`wbgetentities`) rather than the REST API because the REST A
 
 The two calls can be parallelized after step 1 returns the value QIDs.
 
-### `wikidata_resolve_external_id` (1 SPARQL call)
+### `wikidata_resolve_external_id` (1 REST call + 1 SPARQL call, sequential)
 
 | # | Call | Purpose |
 |:--|:-----|:--------|
-| 1 | `POST /sparql` with `SELECT ?item WHERE { ?item wdt:{P} "{value}" }` | Map external ID to QID |
+| 1 | `GET /v1/entities/properties/{id}?_fields=data_type` | Confirm the property's data type is `external-id` before spending a SPARQL call. `?_fields=data_type` answers in ~40 bytes. |
+| 2 | `POST /sparql` with `SELECT ?item WHERE { ?item wdt:{P} "{value}" }` | Map external ID to QID |
+
+Sequential, not parallel — step 1 is a gate, and a non-`external-id` property makes step 2 pointless (the SPARQL is valid but can never match).
 
 Uses SPARQL because the REST API has no "get entity by external ID value" endpoint.
 
@@ -327,16 +337,19 @@ The tool handles Wikidata's auto-label SERVICE boilerplate automatically when `l
 - `value: string` — the external ID value (e.g., `"10.1038/nature01234"`)
 - `language: string` — language for label/description, default `'en'`
 
-**Output:** `{ id, label, description, url }` — QID, display name, description, and Wikidata entity page URL. `null` when no match found (not an error — clean absence signal).
+**Output:** `{ id, label, description, url }` — QID, display name, description, and Wikidata entity page URL. `null` when no match found (not an error — clean absence signal). A null match is not proof of absence: the Query Service lags the live wiki, so it can also mean "not yet indexed". The `match` field's description says so, since that ambiguity decides whether a caller retries.
 
 **Errors:**
-- `invalid_property` (`ValidationError`): P-ID not recognized as an external-ID property
+- `invalid_property` (`ValidationError`): `property` is not in P+digits format. A pure format check, run before any upstream call.
+- `not_external_id_property` (`ValidationError`): the P-ID does not exist on Wikidata, or it exists but its `data_type` is not `external-id` (e.g. `P31`, an item-valued property). One reason covers both — the caller's fix is the same either way, supply a different property.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
-**Implementation note:** Uses SPARQL `SELECT ?item WHERE { ?item wdt:{P} "{value}" . }` — the only viable approach since the REST API has no "find by external ID" endpoint.
+**Implementation note:** Uses SPARQL `SELECT ?item WHERE { ?item wdt:{P} "{value}" . }` — the only viable approach since the REST API has no "find by external ID" endpoint. One `GET /v1/entities/properties/{id}?_fields=data_type` precedes it to enforce the `external-id` datatype; `?_fields=` trims that check to ~40 bytes against a 27–282KB full property payload.
 
-**Value normalization:** Wikidata stores some external IDs in a canonical form that differs from user input. Known cases:
+**Value normalization:** Wikidata stores some external IDs in a canonical form that differs from user input. The value is trimmed, then a resolver-prefix strip runs on it, feeding the bare identifier into the per-property cases:
+- **Surrounding whitespace:** trimmed for every property. Only P698 and P496 discard it incidentally (via the PMID chain's `.trim()` and ORCID's `[-\s]` strip), so without a trim ahead of the switch a padded DOI or IMDb ID reaches the SPARQL literal intact and answers a confident `match: null` for an identifier that resolves. The trim precedes the strip because the resolver patterns are `^`-anchored — a padded URL would not match, and the prefix would survive into the query.
+- **Resolver prefixes:** `https?://(dx.)?doi.org/` and a bare `doi:` scheme for P356; `https?://pubmed.ncbi.nlm.nih.gov/` for P698; `https?://orcid.org/` for P496 — the latter two also absorb a trailing slash, while P356 does not (a DOI suffix can legitimately end in one). DOIs and PMIDs are routinely copy-pasted or API-returned in resolver-URL form. Ordering is load-bearing: ORCID's reformat is gated on a length-16 check that URL text always defeats, so stripping after the per-property step would leave a URL-prefixed *unhyphenated* ORCID silently unformatted.
 - **DOI (P356):** Stored uppercase (e.g., `10.1038/NATURE01234`). The handler must uppercase DOI values before querying — a lowercase input returns zero results.
 - **PubMed ID (P698):** Stored as plain integer string — strip any `PMID:` prefix before querying.
 - **ORCID (P496):** Stored with hyphens in the `0000-0000-0000-000X` format — normalize if user provides without hyphens.
@@ -422,7 +435,7 @@ Wikimedia blocks requests without a valid User-Agent. Required format per policy
 - **No batch entity fetch via REST.** The REST API has no multi-ID endpoint. Batch label resolution uses the MediaWiki API (`wbgetentities`), not REST. Fetching N full entities requires N REST calls — the server uses parallel fetching where possible.
 - **No server-side field selection on entity fetch.** The REST API ignores `?fields=` query parameters and always returns the full entity payload (~370KB for major items). The `fields` parameter on `wikidata_get_entity` filters client-side — the network cost is unavoidable.
 - **Statement value payloads vary by data type.** `wikibase-item`, `time`, `quantity`, `string`, `external-id`, `url`, `monolingualtext`, `globe-coordinate`, `math`, `musical-notation`, `tabular-data`, `geo-shape` — 12+ data types each with different value shapes. The server normalizes to a consistent structure per type, but callers should expect `type` to vary.
-- **External ID case sensitivity.** Wikidata stores DOIs uppercase and other external IDs in canonical forms. The `wikidata_resolve_external_id` handler normalizes known cases (DOI uppercasing, PMID prefix stripping, ORCID hyphen normalization), but unlisted properties use the value as-is.
+- **External ID case sensitivity.** Wikidata stores DOIs uppercase and other external IDs in canonical forms. The `wikidata_resolve_external_id` handler normalizes known cases (whitespace trimming, resolver-URL prefix stripping, DOI uppercasing, PMID prefix stripping, ORCID hyphen normalization), but unlisted properties use the value as-is.
 - **Wikidata data quality is uneven.** Popular entities (Barack Obama, Albert Einstein) are well-maintained. Long-tail items may have sparse labels, missing descriptions, or zero sitelinks. The server faithfully reports what's there — it does not synthesize missing data.
 - **SPARQL endpoint is Blazegraph (planned migration).** Wikimedia has announced intent to migrate away from Blazegraph to a different triplestore. The endpoint URL and SPARQL semantics should be stable, but some Blazegraph-specific extensions (graph traversal algorithms, `bd:sample`) may be discontinued.
 - **5 concurrent SPARQL queries per IP.** A server hosting multiple agent sessions from the same IP can hit this limit. The server does not implement cross-session SPARQL rate tracking — operators running in multi-tenant environments should be aware.
@@ -465,3 +478,14 @@ SPARQL query optimization (via Blazegraph's `EXPLAIN`) would be useful for devel
 
 **No property data type enumeration tool**
 The REST API exposes `/v1/property-data-types` listing Wikidata's 12+ data types. This is developer documentation, not agent-facing functionality. Agents don't need to know the abstract type system — `wikidata_get_statements` handles type normalization internally.
+
+### 2026-07-14
+
+**`wikidata_resolve_external_id` checks the property datatype upstream, not against an allowlist**
+A non-`external-id` property produces valid SPARQL that can never match, so the caller got `match: null` — indistinguishable from a genuine miss. A hardcoded allowlist of external-ID properties was rejected: Wikidata has thousands and adds more, so the list would be wrong the day it shipped. `?_fields=data_type` makes the authoritative check cost tens of bytes and one round trip, which is cheaper than being wrong. Property absence and wrong-datatype share the `not_external_id_property` reason because the caller's fix is identical — supply a different P-ID.
+
+**The resolver-prefix strip runs before the per-property normalization switch**
+Stripping `https://doi.org/`-style wrappers after the per-property transform would appear to work for already-canonical inputs and silently fail for others. ORCID is the proof case: its hyphen reformat is gated on a length-16 check that URL text defeats, so a post-hoc strip returns a URL-prefixed *unhyphenated* ORCID unformatted, and the lookup misses. Stripping first means each property's existing transform always sees a bare identifier.
+
+**`normalizeId()` trims, and is the only place that does**
+Every ID-format call site — the entity/statements/sitelinks tools, the batch label tool, and the `wikidata://entity/{id}` resource — runs its `isQId`/`isPId` check on a `normalizeId()` result, so the four tools inherit the trim at once. The resource inherits it only nominally: a URI path segment carries whitespace percent-encoded (`wikidata://entity/ Q76 ` reaches the handler as `%20Q76`), which `.trim()` does not touch, so it still rejects — correctly, since that URI is malformed. `isQId`/`isPId` deliberately do not trim: nothing reaches them without passing through `normalizeId` first, and a second trim would imply otherwise. `wikidata_resolve_external_id` is the lone exception — its bespoke `/^P\d+$/` check bypasses the service helpers and carries its own trim.
