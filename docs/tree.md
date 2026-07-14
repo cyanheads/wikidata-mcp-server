@@ -1,6 +1,6 @@
 # wikidata-mcp-server - Directory Structure
 
-Generated on: 2026-06-20 18:33:15
+Generated on: 2026-07-14 22:34:15
 
 ```text
 wikidata-mcp-server/
@@ -11,10 +11,12 @@ wikidata-mcp-server/
 │   ├── mcp.json
 │   └── plugin.json
 ├── .github/
-│   └── ISSUE_TEMPLATE/
-│       ├── bug_report.yml
-│       ├── config.yml
-│       └── feature_request.yml
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   ├── config.yml
+│   │   └── feature_request.yml
+│   ├── FUNDING.yml
+│   └── SECURITY.md
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
@@ -154,6 +156,8 @@ wikidata-mcp-server/
 │   ├── prompts/
 │   ├── resources/
 │   │   └── entity.resource.test.ts
+│   ├── services/
+│   │   └── wikidata-rest-service.test.ts
 │   └── tools/
 │       ├── get-entity.tool.test.ts
 │       ├── get-labels.tool.test.ts
@@ -164,6 +168,7 @@ wikidata-mcp-server/
 │       └── sparql-query.tool.test.ts
 ├── .dockerignore
 ├── .env.example
+├── .gitattributes
 ├── .gitignore
 ├── .mcpbignore
 ├── biome.json
