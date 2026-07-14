@@ -26,7 +26,9 @@ export const wikidataGetLabels = tool('wikidata_get_labels', {
       .min(1)
       .default(['en'])
       .describe(
-        'BCP 47 language codes for returned labels and descriptions (e.g., ["en", "de", "fr"]).',
+        'BCP 47 language codes for returned labels and descriptions (e.g., ["en", "de", "fr"]). ' +
+          'A language with no label of its own falls back to the entity\'s multilingual ("mul") value, ' +
+          'returned under the requested code.',
       ),
   }),
 
@@ -106,12 +108,16 @@ export const wikidataGetLabels = tool('wikidata_get_labels', {
       const enLabel = data.labels.en ?? Object.values(data.labels)[0] ?? id;
       const enDesc = data.descriptions.en ?? Object.values(data.descriptions)[0] ?? '';
       lines.push(`**${id}:** ${enLabel}${enDesc ? ` — ${enDesc}` : ''}`);
-      // Show additional language labels if requested
-      const otherLangs = Object.entries(data.labels)
-        .filter(([lang]) => lang !== 'en')
-        .map(([lang, lbl]) => `${lang}: ${lbl}`)
-        .slice(0, 3);
-      if (otherLangs.length) lines.push(`  ${otherLangs.join(' | ')}`);
+      // Show a bounded sample of the other requested languages, disclosing the full count
+      // when the sample is cut — structuredContent always carries every language returned.
+      const otherEntries = Object.entries(data.labels).filter(([lang]) => lang !== 'en');
+      const otherLangs = otherEntries.slice(0, 3).map(([lang, lbl]) => `${lang}: ${lbl}`);
+      if (otherLangs.length) {
+        const total = Object.keys(data.labels).length;
+        lines.push(
+          `  ${otherLangs.join(' | ')}${otherEntries.length > 3 ? ` … (${total} total)` : ''}`,
+        );
+      }
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

@@ -7,9 +7,11 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   getWikidataRestService,
+  isEntityNotFoundError,
   isPId,
   isQId,
   normalizeId,
+  resolveLangValue,
 } from '@/services/wikidata/wikidata-rest-service.js';
 
 const FIELD_ENUM = z.enum(['labels', 'descriptions', 'aliases', 'statements', 'sitelinks']);
@@ -43,7 +45,8 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       .optional()
       .describe(
         'Language codes to include in labels, descriptions, and aliases (e.g., ["en", "de"]). ' +
-          'Omit to return all available languages.',
+          'A requested language with no label of its own falls back to the entity\'s multilingual ("mul") ' +
+          'value, returned under the requested code. Omit to return all available languages.',
       ),
   }),
 
@@ -95,7 +98,7 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
     {
       reason: 'entity_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No entity exists at this ID — the REST API returned resource-not-found.',
+      when: 'No entity exists at this ID — either unassigned (resource-not-found) or out of range (invalid-path-parameter).',
       recovery: 'Verify the ID with wikidata_search_entities or check the Wikidata URL directly.',
     },
     {
@@ -129,10 +132,7 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
     try {
       entity = await svc.fetchEntity(id, ctx);
     } catch (err) {
-      const status = (err as { data?: { status?: number } })?.data?.status;
-      // Wikidata returns 404 for unknown IDs and 400 for syntactically valid but out-of-range IDs
-      // (e.g. Q9999999999 → "invalid-path-parameter"). Both map to entity_not_found.
-      if (status === 404 || status === 400) {
+      if (isEntityNotFoundError(err)) {
         throw ctx.fail('entity_not_found', `No entity found for ID "${id}".`, {
           ...ctx.recoveryFor('entity_not_found'),
         });
@@ -145,14 +145,21 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       input.fields ?? ['labels', 'descriptions', 'aliases', 'statements', 'sitelinks'],
     );
 
-    // Helper to filter language-keyed maps
+    /**
+     * Narrows a language-keyed map to the requested languages, resolving each one through the
+     * entity's `mul` (multilingual) entry when it has no label in that exact language. The
+     * REST API has no language-fallback parameter, so this has to happen here. The resolved
+     * value lands under the *requested* key (labels.en), never a raw `mul` key, to match the
+     * declared Record<lang, string> output contract.
+     */
     const filterLangs = <T>(map: Record<string, T> | undefined): Record<string, T> | undefined => {
       if (!map) return;
       if (!input.languages?.length) return map;
-      const langSet = new Set(input.languages);
-      const filtered = Object.fromEntries(
-        Object.entries(map).filter(([lang]) => langSet.has(lang)),
-      );
+      const filtered: Record<string, T> = {};
+      for (const lang of input.languages) {
+        const value = resolveLangValue(map, lang);
+        if (value !== undefined) filtered[lang] = value;
+      }
       return Object.keys(filtered).length ? filtered : undefined;
     };
 
@@ -222,21 +229,29 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       if (enDesc) {
         lines.push(`**Description:** ${enDesc}`);
       }
-      const otherDescs = Object.entries(result.descriptions)
-        .filter(([lang]) => lang !== 'en')
-        .slice(0, 3)
-        .map(([lang, val]) => `${lang}: ${val}`);
-      if (otherDescs.length) lines.push(`**Descriptions (sample):** ${otherDescs.join(' | ')}`);
+      const otherDescEntries = Object.entries(result.descriptions).filter(
+        ([lang]) => lang !== 'en',
+      );
+      const otherDescs = otherDescEntries.slice(0, 3).map(([lang, val]) => `${lang}: ${val}`);
+      if (otherDescs.length) {
+        const total = Object.keys(result.descriptions).length;
+        lines.push(
+          `**Descriptions (sample):** ${otherDescs.join(' | ')}${otherDescEntries.length > 3 ? ` … (${total} total)` : ''}`,
+        );
+      }
     }
 
     if (result.aliases) {
-      const allAliasEntries = Object.entries(result.aliases).slice(0, 3);
-      for (const [lang, aliases] of allAliasEntries) {
+      const aliasEntries = Object.entries(result.aliases);
+      for (const [lang, aliases] of aliasEntries.slice(0, 3)) {
         if (aliases.length) {
           lines.push(
             `**Aliases (${lang}):** ${aliases.slice(0, 5).join(', ')}${aliases.length > 5 ? ` … (${aliases.length} total)` : ''}`,
           );
         }
+      }
+      if (aliasEntries.length > 3) {
+        lines.push(`**Aliases:** … (${aliasEntries.length} languages total)`);
       }
     }
 

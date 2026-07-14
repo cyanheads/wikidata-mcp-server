@@ -119,6 +119,50 @@ describe('wikidataGetLabels', () => {
     expect(text).toContain('en');
   });
 
+  /**
+   * The rendered text samples 3 non-English languages; structuredContent carries every
+   * language returned. Without a count, a content[]-only client cannot tell a complete
+   * result from a silently-cut sample.
+   */
+  it('format: discloses the total when the language sample is truncated', () => {
+    const langs = ['en', 'de', 'fr', 'es', 'it', 'ja', 'zh', 'pt', 'ru', 'ar'];
+    const blocks = wikidataGetLabels.format!({
+      entities: {
+        Q76: {
+          labels: Object.fromEntries(langs.map((l) => [l, `Obama-${l}`])),
+          descriptions: { en: '44th U.S. President' },
+        },
+      },
+      found: 1,
+      notFound: [],
+      languages: langs,
+    });
+    const text = (blocks[0] as { text: string }).text;
+
+    expect(text).toContain('(10 total)');
+    // Only the first 3 non-English languages are sampled.
+    expect(text).toContain('de: Obama-de');
+    expect(text).not.toContain('ar: Obama-ar');
+  });
+
+  it('format: omits the total when no languages were cut', () => {
+    const blocks = wikidataGetLabels.format!({
+      entities: {
+        Q76: {
+          labels: { en: 'Barack Obama', de: 'Barack Obama' },
+          descriptions: {},
+        },
+      },
+      found: 1,
+      notFound: [],
+      languages: ['en', 'de'],
+    });
+    const text = (blocks[0] as { text: string }).text;
+
+    expect(text).toContain('de: Barack Obama');
+    expect(text).not.toContain('total');
+  });
+
   it('formats output with not-found IDs', () => {
     const output = {
       entities: {},

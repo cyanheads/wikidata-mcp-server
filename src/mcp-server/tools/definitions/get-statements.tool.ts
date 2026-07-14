@@ -8,6 +8,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import type { NormalizedStatement } from '@/services/wikidata/types.js';
 import {
   getWikidataRestService,
+  isEntityNotFoundError,
   isPId,
   isQId,
   normalizeId,
@@ -72,7 +73,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
     {
       reason: 'entity_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No entity exists at this QID.',
+      when: 'No entity exists at this QID — either unassigned or out of range.',
       recovery: 'Verify the ID with wikidata_search_entities or wikidata_get_labels.',
     },
     {
@@ -80,6 +81,13 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'ID is not a valid Q-ID or P-ID format.',
       recovery: 'Supply a valid Q-ID (Q followed by digits) or P-ID (P followed by digits).',
+    },
+    {
+      reason: 'invalid_property',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A properties entry is not a valid P-ID format.',
+      recovery:
+        'Every properties entry must be P followed by digits (e.g., P31). Find P-IDs with wikidata_search_entities using type="property".',
     },
   ],
 
@@ -90,6 +98,25 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
       throw ctx.fail('invalid_id', `"${input.id}" is not a valid Wikidata ID.`, {
         ...ctx.recoveryFor('invalid_id'),
       });
+    }
+
+    /**
+     * Reject malformed P-IDs before the fetch. A malformed entry is the only thing the REST
+     * `?property=` filter answers with 400 — a well-formed but unassigned P-ID (P9999999)
+     * answers 200 with an empty result, which is the honest answer and stays one.
+     *
+     * That 400 is indistinguishable from the one an out-of-range entity ID draws, so without
+     * this check isEntityNotFoundError() below would report a real entity as missing. And a
+     * multi-property request never reaches the filter at all (the service fetches all and
+     * client-filters), so the bad entry would simply vanish from the result.
+     */
+    const invalidProperties = input.properties?.filter((p) => !isPId(normalizeId(p))) ?? [];
+    if (invalidProperties.length > 0) {
+      throw ctx.fail(
+        'invalid_property',
+        `Invalid property IDs: ${invalidProperties.join(', ')}. Properties must be P followed by digits (e.g., P31).`,
+        { invalid: invalidProperties, ...ctx.recoveryFor('invalid_property') },
+      );
     }
 
     const svc = getWikidataRestService();
@@ -104,10 +131,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
     try {
       rawStatements = await svc.fetchStatements(id, input.properties, ctx);
     } catch (err) {
-      const status = (err as { data?: { status?: number } })?.data?.status;
-      // Wikidata returns 404 for unknown IDs and 400 for syntactically valid but out-of-range IDs
-      // (e.g. Q9999999999 → "invalid-path-parameter"). Both map to entity_not_found.
-      if (status === 404 || status === 400) {
+      if (isEntityNotFoundError(err)) {
         throw ctx.fail('entity_not_found', `No entity found for ID "${id}".`, {
           ...ctx.recoveryFor('entity_not_found'),
         });

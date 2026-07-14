@@ -3,18 +3,30 @@
  * @module tests/resources/entity.resource.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataEntityResource } from '@/mcp-server/resources/definitions/entity.resource.js';
 
 const mockFetchEntity = vi.fn();
 
-vi.mock('@/services/wikidata/wikidata-rest-service.js', () => ({
+/**
+ * Stub only the service accessor — the module's pure helpers (isEntityNotFoundError,
+ * resolveLangValue, isQId, normalizeId) stay real so this exercises the production
+ * not-found predicate and mul-fallback.
+ */
+vi.mock('@/services/wikidata/wikidata-rest-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/wikidata/wikidata-rest-service.js')>()),
   getWikidataRestService: () => ({ fetchEntity: mockFetchEntity }),
-  isQId: (id: string) => /^[Qq]\d+$/.test(id),
-  isPId: (id: string) => /^[Pp]\d+$/.test(id),
-  normalizeId: (id: string) => id.toUpperCase(),
 }));
+
+/** Mirrors what fetchWithTimeout rejects with on a non-2xx: an McpError carrying data.statusCode. */
+const httpError = (statusCode: number) =>
+  new McpError(
+    statusCode === 404 ? JsonRpcErrorCode.NotFound : JsonRpcErrorCode.InvalidParams,
+    `Fetch failed for https://www.wikidata.org/w/rest.php/wikibase/v1/entities/items/Q76. Status: ${statusCode}`,
+    { statusCode, responseBody: '{"code":"invalid-path-parameter"}' },
+  );
 
 const mockItemEntity = {
   id: 'Q76',
@@ -135,16 +147,43 @@ describe('wikidataEntityResource', () => {
     expect(mockFetchEntity).not.toHaveBeenCalled();
   });
 
-  it('throws NotFound when the entity does not exist (404)', async () => {
-    mockFetchEntity.mockRejectedValue({ data: { status: 404 } });
+  it('throws NotFound for an unassigned ID (404)', async () => {
+    mockFetchEntity.mockRejectedValue(httpError(404));
 
     const ctx = createMockContext({ uri: new URL('wikidata://entity/Q99999999') });
     await expect(wikidataEntityResource.handler({ id: 'Q99999999' }, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
       message: expect.stringContaining('Q99999999'),
     });
   });
 
-  it('re-throws non-404 service errors', async () => {
+  /** The out-of-range case the resource previously let through as a raw REST error. */
+  it('throws NotFound for an out-of-range ID (400)', async () => {
+    mockFetchEntity.mockRejectedValue(httpError(400));
+
+    const ctx = createMockContext({ uri: new URL('wikidata://entity/Q999999999999') });
+    await expect(
+      wikidataEntityResource.handler({ id: 'Q999999999999' }, ctx),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      message: expect.stringContaining('Q999999999999'),
+    });
+  });
+
+  it('does not expose the internal REST URL or upstream body on a not-found', async () => {
+    mockFetchEntity.mockRejectedValue(httpError(400));
+
+    const ctx = createMockContext({ uri: new URL('wikidata://entity/Q999999999999') });
+    const err = await wikidataEntityResource
+      .handler({ id: 'Q999999999999' }, ctx)
+      .catch((e: Error) => e);
+
+    expect(err.message).toBe('No Wikidata entity found for ID "Q999999999999".');
+    expect(err.message).not.toContain('rest.php');
+    expect(err.message).not.toContain('invalid-path-parameter');
+  });
+
+  it('re-throws service errors that are not a not-found', async () => {
     mockFetchEntity.mockRejectedValue(new Error('Network failure'));
 
     const ctx = createMockContext({ uri: new URL('wikidata://entity/Q76') });
@@ -245,6 +284,38 @@ describe('wikidataEntityResource', () => {
 
     expect(result).toContain('Instance of');
     expect(result).toContain('Q5');
+  });
+
+  /**
+   * Q76 carries a mul label and no `en` label in the REST response — the header rendered
+   * as a bare QID before the fallback landed.
+   */
+  it('renders the mul label in the header when the entity has no en label', async () => {
+    mockFetchEntity.mockResolvedValue({
+      id: 'Q76',
+      type: 'item',
+      labels: { mul: 'Barack Obama' },
+      descriptions: { mul: 'US president' },
+    });
+
+    const ctx = createMockContext({ uri: new URL('wikidata://entity/Q76') });
+    const result = (await wikidataEntityResource.handler({ id: 'Q76' }, ctx)) as string;
+
+    expect(result).toContain('# Barack Obama (Q76)');
+    expect(result).toContain('*US president*');
+  });
+
+  it('prefers an exact en label over the mul fallback in the header', async () => {
+    mockFetchEntity.mockResolvedValue({
+      id: 'Q42',
+      type: 'item',
+      labels: { en: 'Douglas Adams', mul: 'D. Adams' },
+    });
+
+    const ctx = createMockContext({ uri: new URL('wikidata://entity/Q42') });
+    const result = (await wikidataEntityResource.handler({ id: 'Q42' }, ctx)) as string;
+
+    expect(result).toContain('# Douglas Adams (Q42)');
   });
 
   it('list() returns static example resources', () => {

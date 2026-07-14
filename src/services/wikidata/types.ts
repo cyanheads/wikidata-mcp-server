@@ -88,6 +88,8 @@ export type WbGetEntitiesResponse = {
   error?: {
     code: string;
     info: string;
+    /** The offending entity ID on a `no-such-entity` error. Only the first bad ID is named. */
+    id?: string;
   };
   servedby?: string;
 };

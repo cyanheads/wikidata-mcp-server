@@ -5,13 +5,9 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
+import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import {
-  fetchWithTimeout,
-  httpErrorFromResponse,
-  type RequestContext,
-  withRetry,
-} from '@cyanheads/mcp-ts-core/utils';
+import { fetchWithTimeout, type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type {
   NormalizedStatement,
@@ -43,6 +39,42 @@ export function normalizeId(id: string): string {
   return id.toUpperCase();
 }
 
+/**
+ * True when an error from an entity-addressed REST lookup means "this entity does not exist".
+ *
+ * The REST API answers a well-formed but unassigned ID (Q99999999) with 404, and a
+ * syntactically valid but out-of-range ID (Q999999999999) with 400 `invalid-path-parameter`
+ * — on the items, statements, and sitelinks endpoints alike. Both mean the same thing to a
+ * caller, so both map to `entity_not_found`. `fetchWithTimeout` rejects every non-2xx with an
+ * `McpError` carrying the HTTP status on `data.statusCode`.
+ *
+ * Call this only from entity-addressed lookups (fetchEntity/fetchStatements/fetchSitelinks).
+ * `search()` shares the same transport, but a 400 there means a malformed query, not a
+ * missing entity — classifying it as not-found would report a broken search as an empty one.
+ */
+export function isEntityNotFoundError(err: unknown): boolean {
+  const statusCode = (err as { data?: { statusCode?: number } } | null)?.data?.statusCode;
+  return statusCode === 404 || statusCode === 400;
+}
+
+/**
+ * Reads the value for `lang` from a REST language-keyed map, falling back to the
+ * multilingual (`mul`) entry.
+ *
+ * Wikidata increasingly stores a single `mul` label for names that are identical across
+ * languages, and the REST API returns exactly the keys an entity happens to carry — it has
+ * no `languagefallback` parameter, so an item like Q76 comes back with a `mul` label and no
+ * `en` label at all. Without this fallback, label-oriented surfaces render the bare QID.
+ * The MediaWiki batch path (`fetchLabels`) gets the equivalent server-side via
+ * `languagefallback=1` and does not need this.
+ */
+export function resolveLangValue<T>(
+  map: Record<string, T> | undefined,
+  lang: string,
+): T | undefined {
+  return map?.[lang] ?? map?.mul;
+}
+
 export class WikidataRestService {
   private readonly userAgent: string;
   private readonly restTimeoutMs: number;
@@ -60,6 +92,10 @@ export class WikidataRestService {
     };
   }
 
+  /**
+   * GETs JSON from the REST API. `fetchWithTimeout` rejects every non-2xx itself — with the
+   * status on `data.statusCode` — so a returned response is always 2xx and needs no status check.
+   */
   private getJson<T>(url: string, ctx: Context): Promise<T> {
     const rctx = ctx as unknown as RequestContext;
     return withRetry(
@@ -68,12 +104,8 @@ export class WikidataRestService {
           headers: this.headers,
           signal: ctx.signal,
         });
-        if (!response.ok) {
-          throw await httpErrorFromResponse(response, { service: 'Wikidata REST' });
-        }
         const text = await response.text();
         if (isHtmlResponse(text)) {
-          const { serviceUnavailable } = await import('@cyanheads/mcp-ts-core/errors');
           throw serviceUnavailable(
             'Wikidata REST returned HTML — likely rate-limited or under maintenance.',
           );
@@ -168,8 +200,58 @@ export class WikidataRestService {
   }
 
   /**
+   * Issues one `wbgetentities` request. `languagefallback=1` makes the API resolve a requested
+   * language to the entity's `mul` (multilingual) or other fallback label when it has no
+   * label in that exact language — Q76 has only a `mul` label and would otherwise come back
+   * with an empty `labels` map. Fallback values stay keyed by the *requested* language, so
+   * the extraction below is unaffected.
+   *
+   * `fetchWithTimeout` rejects every non-2xx itself, so a returned response is always 2xx.
+   * A rejected batch still arrives as HTTP 200 carrying a top-level `error` — see fetchLabels.
+   */
+  private fetchWbEntities(
+    ids: string[],
+    languages: string[],
+    ctx: Context,
+  ): Promise<WbGetEntitiesResponse> {
+    const params = new URLSearchParams({
+      action: 'wbgetentities',
+      ids: ids.join('|'),
+      props: 'labels|descriptions',
+      languages: languages.join('|'),
+      languagefallback: '1',
+      format: 'json',
+      formatversion: '2',
+    });
+    const url = `${MW_API_BASE}?${params}`;
+    const rctx = ctx as unknown as RequestContext;
+
+    return withRetry(
+      async () => {
+        const response = await fetchWithTimeout(url, this.restTimeoutMs, rctx, {
+          headers: this.headers,
+          signal: ctx.signal,
+        });
+        const text = await response.text();
+        if (isHtmlResponse(text)) {
+          throw serviceUnavailable('Wikidata MW API returned HTML — likely rate-limited.');
+        }
+        return JSON.parse(text) as WbGetEntitiesResponse;
+      },
+      {
+        operation: 'WikidataRest.fetchLabels',
+        context: rctx,
+        baseDelayMs: 1000,
+        signal: ctx.signal,
+      },
+    );
+  }
+
+  /**
    * Batch-resolve labels and descriptions for up to 50 IDs using the MediaWiki
    * wbgetentities API (the REST API has no batch label endpoint).
+   *
+   * IDs absent from the result did not resolve; callers diff against what they requested.
    */
   async fetchLabels(
     ids: string[],
@@ -191,44 +273,37 @@ export class WikidataRestService {
 
     await Promise.all(
       batches.map(async (batch) => {
-        const params = new URLSearchParams({
-          action: 'wbgetentities',
-          ids: batch.map(normalizeId).join('|'),
-          props: 'labels|descriptions',
-          languages: languages.join('|'),
-          format: 'json',
-          formatversion: '2',
-        });
-        const url = `${MW_API_BASE}?${params}`;
-        ctx.log.debug('Fetching labels batch', { count: batch.length, languages });
+        let remaining = batch.map(normalizeId);
+        ctx.log.debug('Fetching labels batch', { count: remaining.length, languages });
 
-        const rctx = ctx as unknown as RequestContext;
-        const data = await withRetry(
-          async () => {
-            const response = await fetchWithTimeout(url, this.restTimeoutMs, rctx, {
-              headers: this.headers,
-              signal: ctx.signal,
-            });
-            if (!response.ok) {
-              throw await httpErrorFromResponse(response, { service: 'Wikidata MW API' });
-            }
-            const text = await response.text();
-            if (isHtmlResponse(text)) {
-              const { serviceUnavailable } = await import('@cyanheads/mcp-ts-core/errors');
-              throw serviceUnavailable('Wikidata MW API returned HTML — likely rate-limited.');
-            }
-            return JSON.parse(text) as WbGetEntitiesResponse;
-          },
-          {
-            operation: 'WikidataRest.fetchLabels',
-            context: rctx,
-            baseDelayMs: 1000,
-            signal: ctx.signal,
-          },
-        );
+        /**
+         * An out-of-range ID (Q999999999999) makes the API reject the whole batch with a
+         * top-level `no-such-entity` error instead of an `entities` map, naming only the
+         * FIRST offending ID — so valid members resolve only if we drop the named ID and
+         * re-request. Each pass removes exactly one ID, so this terminates.
+         *
+         * A merely unassigned ID (Q99999999) is not affected: it arrives inside a normal
+         * `entities` map with a per-item `missing` marker, handled below.
+         */
+        while (remaining.length > 0) {
+          const data = await this.fetchWbEntities(remaining, languages, ctx);
 
-        if (data.entities) {
-          for (const [id, entity] of Object.entries(data.entities)) {
+          if (data.error) {
+            const badId = data.error.id;
+            if (data.error.code === 'no-such-entity' && badId && remaining.includes(badId)) {
+              ctx.log.debug('Dropping unresolvable ID from labels batch', { id: badId });
+              remaining = remaining.filter((id) => id !== badId);
+              continue;
+            }
+            // Any other top-level error is a real failure — surface it rather than let the
+            // batch collapse into a silent "none of these IDs exist".
+            throw serviceUnavailable(
+              `Wikidata MW API rejected the labels request: ${data.error.info} (${data.error.code})`,
+              { apiErrorCode: data.error.code, retryable: false },
+            );
+          }
+
+          for (const [id, entity] of Object.entries(data.entities ?? {})) {
             if (entity.missing === '') continue;
             results[id] = {
               labels: Object.fromEntries(
@@ -239,6 +314,7 @@ export class WikidataRestService {
               ),
             };
           }
+          return;
         }
       }),
     );

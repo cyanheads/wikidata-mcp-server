@@ -7,6 +7,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   getWikidataRestService,
+  isEntityNotFoundError,
   isQId,
   normalizeId,
 } from '@/services/wikidata/wikidata-rest-service.js';
@@ -74,7 +75,7 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
     {
       reason: 'entity_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No item exists at this Q-ID.',
+      when: 'No item exists at this Q-ID — either unassigned or out of range.',
       recovery: 'Verify the Q-ID with wikidata_search_entities or wikidata_get_labels.',
     },
     {
@@ -103,7 +104,7 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
     try {
       rawSitelinks = await svc.fetchSitelinks(id, input.sites, ctx);
     } catch (err) {
-      if ((err as { data?: { status?: number } })?.data?.status === 404) {
+      if (isEntityNotFoundError(err)) {
         throw ctx.fail('entity_not_found', `No item found for Q-ID "${id}".`, {
           ...ctx.recoveryFor('entity_not_found'),
         });

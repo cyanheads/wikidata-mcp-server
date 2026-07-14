@@ -209,8 +209,8 @@ Raw SPARQL forwarded to the endpoint. Hard 60s server timeout; default client ti
 **Output:** Entity data with only the requested fields. Each field is returned as-is from the API with no truncation. The `statements` field preserves full qualifier and reference structure. P-IDs include a `data_type` field; `sitelinks` is absent on property entities.
 
 **Errors:**
-- `entity_not_found` (`NotFound`): no entity exists at this ID (REST returns `code: "resource-not-found"`)
-- `invalid_id` (`InvalidParams`): ID format unrecognized (must be Q+digits or P+digits)
+- `entity_not_found` (`NotFound`): no entity exists at this ID. REST answers an unassigned but well-formed ID (`Q99999999`) with HTTP 404 `resource-not-found`, and a syntactically valid but out-of-range ID (`Q999999999999`) with HTTP 400 `invalid-path-parameter` — both mean "no such entity" to a caller and map to this reason.
+- `invalid_id` (`ValidationError`): ID format unrecognized (must be Q+digits or P+digits)
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -227,12 +227,21 @@ Raw SPARQL forwarded to the endpoint. Hard 60s server timeout; default client ti
 **Output:** `{ entities: Record<id, { labels: Record<lang, string>, descriptions: Record<lang, string> }> }` — only requested languages included.
 
 **Errors:**
-- `invalid_ids` (`InvalidParams`): array contains non-Q/P-ID values
-- `entity_not_found` (`NotFound`): one or more valid-format IDs do not exist — the MediaWiki API returns `{"error": {"code": "no-such-entity"}}` at the top level (not inside `entities`) when any requested ID is missing. The handler must check for this and report which IDs were not found.
+- `invalid_ids` (`ValidationError`): array contains non-Q/P-ID values
+
+An ID that is well-formed but does not resolve is not an error — it is absent from `entities` and listed in `notFound`, so a partial batch still returns its valid members.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: false` (given valid IDs, output is deterministic)
 
-**Implementation note:** Uses `wbgetentities` MediaWiki API with `props=labels|descriptions` and `languages` parameter. Supports up to 50 IDs per request; the handler chunks inputs into batches of 50 and parallelizes. When a non-existent ID is in the batch, the API returns a top-level `error` key rather than an entry in `entities` — handle this explicitly.
+**Implementation note:** Uses `wbgetentities` MediaWiki API with `props=labels|descriptions` and `languages` parameter. Supports up to 50 IDs per request; the handler chunks inputs into batches of 50 and parallelizes.
+
+A non-resolving ID has two distinct shapes, and they must not be conflated:
+- **Unassigned but in range** (`Q99999999`): arrives inside a normal `entities` map as a per-item `{"id": "Q99999999", "missing": ""}` marker, alongside the valid members. Skip the marked entry.
+- **Out of range** (`Q999999999999`): rejects the *whole batch* with a top-level `error` key (`code: "no-such-entity"`) and no `entities` map at all, naming only the **first** offending ID in `error.id`. Drop the named ID and re-request the remainder, so valid members still resolve; repeat until the batch clears (each pass removes exactly one ID, so it terminates). Any other top-level `error` code is a real failure and is thrown rather than reported as "nothing found".
+
+Both arrive as HTTP 200 — the error rides in the body, not the status.
+
+`languagefallback=1` is set on every request so a requested language with no label of its own resolves to the entity's `mul` (multilingual) value. Fallback values stay keyed by the requested language, carrying `language`/`for-language` metadata alongside `value`.
 
 ---
 
@@ -256,8 +265,11 @@ Statement value normalization by data type:
 - `monolingualtext` values: `{ text, language }`
 
 **Errors:**
-- `entity_not_found` (`NotFound`): no item at this QID
-- `invalid_property` (`InvalidParams`): property ID not in P+digits format
+- `entity_not_found` (`NotFound`): no item at this QID — HTTP 404 (unassigned) or HTTP 400 (out of range), same as `wikidata_get_entity`
+- `invalid_id` (`ValidationError`): ID is not a valid Q-ID or P-ID format
+- `invalid_property` (`ValidationError`): a `properties` entry is not P+digits format. Validated before the fetch, naming every offending entry — a malformed entry is the only thing the REST `?property=` filter answers with HTTP 400, so rejecting it here keeps that status unambiguous for `entity_not_found`.
+
+A well-formed but unassigned P-ID (`P9999999`) is not an error — it returns an empty result, the honest answer to "this entity has no such statements".
 
 **Annotations:** `readOnlyHint: true`
 
@@ -275,8 +287,8 @@ Statement value normalization by data type:
 **Output:** `{ sitelinks: Record<siteCode, { title, url, badges }> }` — site code → article metadata.
 
 **Errors:**
-- `entity_not_found` (`NotFound`): no item at this QID
-- `no_sitelinks` (`NotFound`): entity has no sitelinks (e.g., some properties, abstract items)
+- `entity_not_found` (`NotFound`): no item at this QID — HTTP 404 (unassigned) or HTTP 400 (out of range); the sitelinks endpoint returns the same status pair as the items endpoint
+- `not_an_item` (`ValidationError`): a P-ID was supplied — only items (Q-IDs) have sitelinks
 
 **Annotations:** `readOnlyHint: true`
 
@@ -296,9 +308,9 @@ The tool handles Wikidata's auto-label SERVICE boilerplate automatically when `l
 **Output:** `{ results: Array<Record<string, { type, value, "xml:lang"? }>>, variables: string[], truncated: boolean }` — raw SPARQL bindings with type annotations. Language-tagged literals use the key `"xml:lang"` (not `"lang"`) — this is the SPARQL 1.1 JSON format. `truncated` is always false for SELECT queries (results are complete or the query times out).
 
 **Errors:**
-- `parse_error` (`InvalidParams`): SPARQL syntax error — includes the relevant error line stripped from the Blazegraph stack trace
+- `parse_error` (`ValidationError`): SPARQL syntax error — includes the relevant error line stripped from the Blazegraph stack trace
 - `timeout` (`ServiceUnavailable`, retryable): query exceeded the time limit — simplify or add LIMIT
-- `throttled` (`ServiceUnavailable`, retryable): rate limited (60 req/min, 5 concurrent per IP) — retry after `Retry-After` header value
+- `throttled` (`RateLimited`, retryable): rate limited (60 req/min, 5 concurrent per IP) — retry after `Retry-After` header value
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -318,8 +330,7 @@ The tool handles Wikidata's auto-label SERVICE boilerplate automatically when `l
 **Output:** `{ id, label, description, url }` — QID, display name, description, and Wikidata entity page URL. `null` when no match found (not an error — clean absence signal).
 
 **Errors:**
-- `invalid_property` (`InvalidParams`): P-ID not recognized as an external-ID property
-- `multiple_matches` (`InvalidParams`): more than one entity claims this external ID (data integrity issue in Wikidata) — returns all matches for disambiguation
+- `invalid_property` (`ValidationError`): P-ID not recognized as an external-ID property
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 

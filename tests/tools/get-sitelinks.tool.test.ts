@@ -3,17 +3,29 @@
  * @module tests/tools/get-sitelinks.tool.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataGetSitelinks } from '@/mcp-server/tools/definitions/get-sitelinks.tool.js';
 
 const mockFetchSitelinks = vi.fn();
 
-vi.mock('@/services/wikidata/wikidata-rest-service.js', () => ({
+/**
+ * Stub only the service accessor — the module's pure helpers (isEntityNotFoundError,
+ * isQId, normalizeId) stay real so the not-found predicate under test is production's.
+ */
+vi.mock('@/services/wikidata/wikidata-rest-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/wikidata/wikidata-rest-service.js')>()),
   getWikidataRestService: () => ({ fetchSitelinks: mockFetchSitelinks }),
-  isQId: (id: string) => /^[Qq]\d+$/.test(id),
-  normalizeId: (id: string) => id.toUpperCase(),
 }));
+
+/** Mirrors what fetchWithTimeout rejects with on a non-2xx: an McpError carrying data.statusCode. */
+const httpError = (statusCode: number) =>
+  new McpError(
+    statusCode === 404 ? JsonRpcErrorCode.NotFound : JsonRpcErrorCode.InvalidParams,
+    `Fetch failed. Status: ${statusCode}`,
+    { statusCode },
+  );
 
 const mockSitelinks = {
   enwiki: { title: 'Barack Obama', url: 'https://en.wikipedia.org/wiki/Barack_Obama' },
@@ -71,14 +83,36 @@ describe('wikidataGetSitelinks', () => {
     });
   });
 
-  it('throws entity_not_found when service returns 404', async () => {
-    mockFetchSitelinks.mockRejectedValue({ data: { status: 404 } });
+  it('throws entity_not_found for an unassigned ID (404)', async () => {
+    mockFetchSitelinks.mockRejectedValue(httpError(404));
 
     const ctx = createMockContext({ errors: wikidataGetSitelinks.errors });
-    const input = wikidataGetSitelinks.input.parse({ id: 'Q99999' });
+    const input = wikidataGetSitelinks.input.parse({ id: 'Q99999999' });
     await expect(wikidataGetSitelinks.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'entity_not_found' },
     });
+  });
+
+  /** The sitelinks endpoint answers an out-of-range ID with 400, same as the items endpoint. */
+  it('throws entity_not_found for an out-of-range ID (400)', async () => {
+    mockFetchSitelinks.mockRejectedValue(httpError(400));
+
+    const ctx = createMockContext({ errors: wikidataGetSitelinks.errors });
+    const input = wikidataGetSitelinks.input.parse({ id: 'Q999999999999' });
+    await expect(wikidataGetSitelinks.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'entity_not_found' },
+    });
+  });
+
+  it('does not leak the raw upstream URL or status on a not-found', async () => {
+    mockFetchSitelinks.mockRejectedValue(httpError(400));
+
+    const ctx = createMockContext({ errors: wikidataGetSitelinks.errors });
+    const input = wikidataGetSitelinks.input.parse({ id: 'Q999999999999' });
+    const err = await wikidataGetSitelinks.handler(input, ctx).catch((e: Error) => e);
+
+    expect(err.message).toBe('No item found for Q-ID "Q999999999999".');
+    expect(err.message).not.toContain('Status:');
   });
 
   it('returns empty sitelinks with message when no matches', async () => {
@@ -184,7 +218,7 @@ describe('wikidataGetSitelinks', () => {
     expect(text).toContain('Barack Obama');
   });
 
-  it('re-throws non-404 service errors', async () => {
+  it('re-throws service errors that are not a not-found', async () => {
     mockFetchSitelinks.mockRejectedValue(new Error('Connection refused'));
 
     const ctx = createMockContext({ errors: wikidataGetSitelinks.errors });

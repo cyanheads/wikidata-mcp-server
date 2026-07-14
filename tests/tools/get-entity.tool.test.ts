@@ -3,18 +3,31 @@
  * @module tests/tools/get-entity.tool.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataGetEntity } from '@/mcp-server/tools/definitions/get-entity.tool.js';
 
 const mockFetchEntity = vi.fn();
 
-vi.mock('@/services/wikidata/wikidata-rest-service.js', () => ({
+/**
+ * Stub only the service accessor — the I/O boundary. The module's pure helpers
+ * (isEntityNotFoundError, resolveLangValue, isQId, normalizeId) stay real, so these
+ * tests exercise the actual not-found predicate and mul-fallback rather than a
+ * second copy of that logic living in the mock.
+ */
+vi.mock('@/services/wikidata/wikidata-rest-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/wikidata/wikidata-rest-service.js')>()),
   getWikidataRestService: () => ({ fetchEntity: mockFetchEntity }),
-  isQId: (id: string) => /^[Qq]\d+$/.test(id),
-  isPId: (id: string) => /^[Pp]\d+$/.test(id),
-  normalizeId: (id: string) => id.toUpperCase(),
 }));
+
+/** Mirrors what fetchWithTimeout rejects with on a non-2xx: an McpError carrying data.statusCode. */
+const httpError = (statusCode: number) =>
+  new McpError(
+    statusCode === 404 ? JsonRpcErrorCode.NotFound : JsonRpcErrorCode.InvalidParams,
+    `Fetch failed for https://www.wikidata.org/w/rest.php/wikibase/v1/entities/items/Q76. Status: ${statusCode}`,
+    { statusCode, statusText: statusCode === 404 ? 'Not Found' : 'Bad Request' },
+  );
 
 const mockEntity = {
   id: 'Q76',
@@ -100,8 +113,8 @@ describe('wikidataGetEntity', () => {
     });
   });
 
-  it('throws entity_not_found when service returns 404', async () => {
-    mockFetchEntity.mockRejectedValue({ data: { status: 404 } });
+  it('throws entity_not_found for an unassigned ID (404)', async () => {
+    mockFetchEntity.mockRejectedValue(httpError(404));
 
     const ctx = createMockContext({ errors: wikidataGetEntity.errors });
     const input = wikidataGetEntity.input.parse({ id: 'Q99999999' });
@@ -110,7 +123,29 @@ describe('wikidataGetEntity', () => {
     });
   });
 
-  it('re-throws non-404 service errors', async () => {
+  it('throws entity_not_found for an out-of-range ID (400)', async () => {
+    mockFetchEntity.mockRejectedValue(httpError(400));
+
+    const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+    const input = wikidataGetEntity.input.parse({ id: 'Q999999999999' });
+    await expect(wikidataGetEntity.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'entity_not_found' },
+    });
+  });
+
+  it('does not leak the raw upstream URL or status on a not-found', async () => {
+    mockFetchEntity.mockRejectedValue(httpError(400));
+
+    const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+    const input = wikidataGetEntity.input.parse({ id: 'Q999999999999' });
+    const err = await wikidataGetEntity.handler(input, ctx).catch((e: Error) => e);
+
+    expect(err.message).toBe('No entity found for ID "Q999999999999".');
+    expect(err.message).not.toContain('rest.php');
+    expect(err.message).not.toContain('Status:');
+  });
+
+  it('re-throws service errors that are not a not-found', async () => {
     mockFetchEntity.mockRejectedValue(new Error('Network timeout'));
 
     const ctx = createMockContext({ errors: wikidataGetEntity.errors });
@@ -152,26 +187,6 @@ describe('wikidataGetEntity', () => {
     expect(text).toContain('Barack Obama');
     expect(text).toContain('44th U.S. President');
     expect(text).toContain('Sitelinks');
-  });
-
-  it('throws entity_not_found for 404 HTTP status', async () => {
-    mockFetchEntity.mockRejectedValue({ data: { status: 404 } });
-
-    const ctx = createMockContext({ errors: wikidataGetEntity.errors });
-    const input = wikidataGetEntity.input.parse({ id: 'Q76' });
-    await expect(wikidataGetEntity.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'entity_not_found' },
-    });
-  });
-
-  it('throws entity_not_found for 400 HTTP status (out-of-range ID)', async () => {
-    mockFetchEntity.mockRejectedValue({ data: { status: 400 } });
-
-    const ctx = createMockContext({ errors: wikidataGetEntity.errors });
-    const input = wikidataGetEntity.input.parse({ id: 'Q9999999999' });
-    await expect(wikidataGetEntity.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'entity_not_found' },
-    });
   });
 
   it('includes badges in sitelinks when present', async () => {
@@ -227,6 +242,128 @@ describe('wikidataGetEntity', () => {
 
     // No labels match the requested language — filtered to undefined
     expect(result.labels).toBeUndefined();
+  });
+
+  /**
+   * The REST API returns exactly the language keys an entity carries and has no
+   * languagefallback parameter, so a mul-only item like Q76 arrives with no `en` label.
+   */
+  it('resolves a requested language to the mul label when the entity has no label for it', async () => {
+    mockFetchEntity.mockResolvedValue({
+      id: 'Q76',
+      type: 'item',
+      labels: { mul: 'Barack Obama' },
+      descriptions: { en: 'president of the United States from 2009 to 2017 (born 1961)' },
+      aliases: { mul: ['Barack Hussein Obama II'] },
+    });
+
+    const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+    const input = wikidataGetEntity.input.parse({
+      id: 'Q76',
+      fields: ['labels', 'descriptions', 'aliases'],
+      languages: ['en', 'de'],
+    });
+    const result = await wikidataGetEntity.handler(input, ctx);
+
+    // The mul value lands under each requested code, never as a raw `mul` key.
+    const labels = result.labels as Record<string, string>;
+    expect(labels).toEqual({ en: 'Barack Obama', de: 'Barack Obama' });
+    expect(labels.mul).toBeUndefined();
+    // A real per-language value still wins over mul.
+    expect((result.descriptions as Record<string, string>).en).toContain('president');
+    expect((result.aliases as Record<string, string[]>).en).toEqual(['Barack Hussein Obama II']);
+  });
+
+  it('prefers an exact language label over the mul fallback', async () => {
+    mockFetchEntity.mockResolvedValue({
+      id: 'Q42',
+      type: 'item',
+      labels: { en: 'Douglas Adams', mul: 'D. Adams' },
+    });
+
+    const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+    const input = wikidataGetEntity.input.parse({
+      id: 'Q42',
+      fields: ['labels'],
+      languages: ['en'],
+    });
+    const result = await wikidataGetEntity.handler(input, ctx);
+
+    expect((result.labels as Record<string, string>).en).toBe('Douglas Adams');
+  });
+
+  it('returns mul as its own key when the caller requests it explicitly', async () => {
+    mockFetchEntity.mockResolvedValue({
+      id: 'Q76',
+      type: 'item',
+      labels: { mul: 'Barack Obama' },
+    });
+
+    const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+    const input = wikidataGetEntity.input.parse({
+      id: 'Q76',
+      fields: ['labels'],
+      languages: ['mul'],
+    });
+    const result = await wikidataGetEntity.handler(input, ctx);
+
+    expect((result.labels as Record<string, string>).mul).toBe('Barack Obama');
+  });
+
+  it('format: discloses the total when the descriptions sample is truncated', () => {
+    const descriptions = Object.fromEntries(
+      ['en', 'de', 'fr', 'es', 'it', 'ja', 'zh', 'pt', 'ru', 'ar'].map((l) => [l, `desc-${l}`]),
+    );
+    const blocks = wikidataGetEntity.format!({
+      id: 'Q76',
+      type: 'item',
+      descriptions,
+      fieldsReturned: ['descriptions'],
+    });
+    const text = (blocks[0] as { text: string }).text;
+
+    expect(text).toContain('(10 total)');
+  });
+
+  it('format: omits the descriptions total when nothing was cut', () => {
+    const blocks = wikidataGetEntity.format!({
+      id: 'Q76',
+      type: 'item',
+      descriptions: { en: 'desc-en', de: 'desc-de' },
+      fieldsReturned: ['descriptions'],
+    });
+    const text = (blocks[0] as { text: string }).text;
+
+    expect(text).toContain('de: desc-de');
+    expect(text).not.toContain('total');
+  });
+
+  it('format: discloses the alias language total when the list is truncated', () => {
+    const aliases = Object.fromEntries(
+      ['en', 'de', 'fr', 'es', 'it'].map((l) => [l, [`alias-${l}`]]),
+    );
+    const blocks = wikidataGetEntity.format!({
+      id: 'Q76',
+      type: 'item',
+      aliases,
+      fieldsReturned: ['aliases'],
+    });
+    const text = (blocks[0] as { text: string }).text;
+
+    expect(text).toContain('(5 languages total)');
+  });
+
+  it('format: omits the alias language total when nothing was cut', () => {
+    const blocks = wikidataGetEntity.format!({
+      id: 'Q76',
+      type: 'item',
+      aliases: { en: ['Obama'] },
+      fieldsReturned: ['aliases'],
+    });
+    const text = (blocks[0] as { text: string }).text;
+
+    expect(text).toContain('Obama');
+    expect(text).not.toContain('languages total');
   });
 
   it('security: injection attempt in ID is rejected as invalid', async () => {

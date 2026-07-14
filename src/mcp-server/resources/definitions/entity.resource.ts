@@ -7,9 +7,11 @@ import { resource, z } from '@cyanheads/mcp-ts-core';
 import { notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
 import {
   getWikidataRestService,
+  isEntityNotFoundError,
   isPId,
   isQId,
   normalizeId,
+  resolveLangValue,
 } from '@/services/wikidata/wikidata-rest-service.js';
 
 export const wikidataEntityResource = resource('wikidata://entity/{id}', {
@@ -40,8 +42,7 @@ export const wikidataEntityResource = resource('wikidata://entity/{id}', {
     try {
       entity = await svc.fetchEntity(id, ctx);
     } catch (err) {
-      const e = err as { data?: { status?: number }; code?: number };
-      if (e?.data?.status === 404) {
+      if (isEntityNotFoundError(err)) {
         throw notFound(`No Wikidata entity found for ID "${id}".`, { id }, { cause: err as Error });
       }
       throw err;
@@ -49,12 +50,13 @@ export const wikidataEntityResource = resource('wikidata://entity/{id}', {
 
     const lines: string[] = [];
 
-    // Header: ID + English label
-    const enLabel = entity.labels?.en;
+    // Header: ID + English label, falling back to the entity's multilingual ("mul") label —
+    // items like Q76 carry only a mul label and would otherwise render as a bare QID.
+    const enLabel = resolveLangValue(entity.labels, 'en');
     lines.push(`# ${enLabel ? `${enLabel} (${id})` : id}`);
 
     // English description
-    const enDesc = entity.descriptions?.en;
+    const enDesc = resolveLangValue(entity.descriptions, 'en');
     if (enDesc) lines.push(`*${enDesc}*`);
 
     lines.push('');
