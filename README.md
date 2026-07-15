@@ -58,9 +58,10 @@ Search Wikidata for items or properties by text query.
 Fetch a Wikidata entity by QID or PID with field selection.
 
 - Q-IDs (e.g. `Q76`) fetch items; P-IDs (e.g. `P31`) fetch properties — endpoint routing is automatic
-- `fields` parameter trims the response to `labels`, `descriptions`, `aliases`, `statements`, or `sitelinks`
-- `languages` parameter filters multilingual maps to specific language codes
-- Full entity payload always fetched from the API; field/language filtering is client-side
+- `fields` parameter selects `labels`, `descriptions`, `aliases`, `statements`, or `sitelinks`
+- `fields` narrows the upstream fetch, not just the response — Q76 is 344,114 bytes whole, 6,703 for `labels` alone
+- `languages` parameter filters multilingual maps to specific language codes, client-side (the entity endpoint takes no language parameter)
+- An entity too large to inline returns a field-category outline with byte sizes instead of the data — follow its `retrieval_notice`: it names a literal `fields` set already measured to fit (category sizes are additive, so requesting every name listed would overflow again), defers the remainder to a further call, and redirects a category too large to deliver whole (statements or sitelinks on a major item) to the tool that can narrow it
 
 ---
 
@@ -82,6 +83,7 @@ Fetch property claims for a Wikidata entity with full qualifier and reference de
 - `properties` parameter fetches only specific P-IDs — omit to return all statements
 - Value QIDs are resolved to human-readable labels by default via a batched label call
 - Set `resolve_labels=false` for raw QIDs only (faster, smaller payload)
+- A statement set too large to inline returns an outline of the available P-IDs with byte sizes, largest first, instead of the statements — re-call with `properties` for the ones you need (unfiltered, Q30 carries 467 properties across 1,717 statements)
 - Preferred-rank statements represent the most current values
 - Designed for fact verification: "what does Wikidata say about this entity's {property}?"
 

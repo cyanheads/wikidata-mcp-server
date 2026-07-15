@@ -21,6 +21,35 @@ import type {
 const REST_BASE = 'https://www.wikidata.org/w/rest.php/wikibase/v1';
 const MW_API_BASE = 'https://www.wikidata.org/w/api.php';
 
+/**
+ * `_fields` values each entity endpoint accepts, verified against the live API.
+ *
+ * The two sets differ: `sitelinks` is items-only and `data_type` is properties-only. An
+ * endpoint answers a value it does not know with 400 `invalid-query-parameter` — the same
+ * status an out-of-range ID draws, which `isEntityNotFoundError()` cannot tell apart. So a
+ * caller asking a property for `sitelinks` would have a real entity reported as missing.
+ * `fetchEntity` intersects against these sets rather than forwarding a field list blindly.
+ *
+ * `id` is absent deliberately: the endpoint rejects it as a selector (400) but returns it
+ * on every response regardless.
+ */
+const ITEM_FIELDS = new Set([
+  'type',
+  'labels',
+  'descriptions',
+  'aliases',
+  'statements',
+  'sitelinks',
+]);
+const PROPERTY_FIELDS = new Set([
+  'type',
+  'data_type',
+  'labels',
+  'descriptions',
+  'aliases',
+  'statements',
+]);
+
 /** Returns true if the response body is an HTML page (rate-limit or maintenance page). */
 const isHtmlResponse = (text: string): boolean => /^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text);
 
@@ -145,14 +174,39 @@ export class WikidataRestService {
     return data.results ?? [];
   }
 
-  /** Fetch a single entity by QID or PID. Routes by ID prefix. */
-  fetchEntity(id: string, ctx: Context): Promise<RawEntity> {
+  /**
+   * Fetch a single entity by QID or PID. Routes by ID prefix.
+   *
+   * `fields` narrows the fetch server-side via `?_fields=`, the parameter the REST API
+   * actually honours — the plausible `?fields=` spelling is accepted and silently ignored,
+   * returning the whole entity. Narrowing is a pure bandwidth win: `items/Q76` is 344,114
+   * bytes whole and 6,703 with `_fields=labels`. Omit `fields` to fetch everything.
+   *
+   * `type` is always requested, because the endpoint drops it unless it is asked for and
+   * every caller needs it; `data_type` likewise for properties, so a narrowed property keeps
+   * the shape an unnarrowed one returns. Values the endpoint would reject are dropped rather
+   * than forwarded — see {@link ITEM_FIELDS}/{@link PROPERTY_FIELDS} for why that matters.
+   */
+  fetchEntity(id: string, ctx: Context, fields?: string[]): Promise<RawEntity> {
     const normalized = normalizeId(id);
-    const path = isQId(normalized)
-      ? `entities/items/${normalized}`
-      : `entities/properties/${normalized}`;
-    const url = `${REST_BASE}/${path}`;
-    ctx.log.debug('Fetching entity', { id: normalized });
+    const isItem = isQId(normalized);
+    const path = isItem ? `entities/items/${normalized}` : `entities/properties/${normalized}`;
+
+    const accepted = isItem ? ITEM_FIELDS : PROPERTY_FIELDS;
+    const selected = fields?.length
+      ? [
+          ...new Set([
+            ...fields.filter((f) => accepted.has(f)),
+            'type',
+            ...(isItem ? [] : ['data_type']),
+          ]),
+        ]
+      : [];
+
+    const url = selected.length
+      ? `${REST_BASE}/${path}?_fields=${selected.join(',')}`
+      : `${REST_BASE}/${path}`;
+    ctx.log.debug('Fetching entity', { id: normalized, fields: selected });
     return this.getJson<RawEntity>(url, ctx);
   }
 

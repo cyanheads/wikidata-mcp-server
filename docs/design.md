@@ -7,7 +7,7 @@
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
 | `wikidata_search_entities` | Search Wikidata for items or properties by text query. Returns QIDs/PIDs with labels, descriptions, and match metadata. | `query`, `type` (item/property), `language`, `limit` | `readOnlyHint: true` |
-| `wikidata_get_entity` | Fetch a Wikidata entity (item or property) by QID or PID. Supports client-side field filtering to trim 300KB+ payloads before returning to the caller. Routes to `/entities/items/{id}` for Q-IDs and `/entities/properties/{id}` for P-IDs. | `id`, `fields` (labels/descriptions/aliases/statements/sitelinks), `languages` | `readOnlyHint: true` |
+| `wikidata_get_entity` | Fetch a Wikidata entity (item or property) by QID or PID. `fields` narrows the fetch server-side via `?_fields=`, cutting a 300KB+ payload to kilobytes. An entity that still overflows returns a field-category outline. Routes to `/entities/items/{id}` for Q-IDs and `/entities/properties/{id}` for P-IDs. | `id`, `fields` (labels/descriptions/aliases/statements/sitelinks), `languages` | `readOnlyHint: true` |
 | `wikidata_get_labels` | Resolve one or more QIDs/PIDs to their human-readable labels and descriptions in specified languages. Lightweight — no claim data. | `ids` (array), `languages` | `readOnlyHint: true` |
 | `wikidata_get_statements` | Get specific property claims for an entity, with qualifier and reference detail. Resolves value QIDs to labels inline. | `id`, `properties` (P-ID array), `language` | `readOnlyHint: true` |
 | `wikidata_get_sitelinks` | Get Wikipedia and other Wikimedia project URLs for an entity, optionally filtered to specific wiki codes. | `id`, `sites` (optional filter array) | `readOnlyHint: true` |
@@ -96,7 +96,7 @@ Each step is independently testable.
 
 | Noun | Operations | Primary Endpoint |
 |:-----|:-----------|:-----------------|
-| Item (Q-ID) | search, get, get-labels, get-statements, get-sitelinks | REST `/v1/search/items`, `/v1/entities/items/{id}` (all fields always returned — field filtering is client-side), `/v1/entities/items/{id}/statements`, `/v1/entities/items/{id}/sitelinks` |
+| Item (Q-ID) | search, get, get-labels, get-statements, get-sitelinks | REST `/v1/search/items`, `/v1/entities/items/{id}` (`?_fields=` narrows the fetch server-side), `/v1/entities/items/{id}/statements`, `/v1/entities/items/{id}/sitelinks` |
 | Property (P-ID) | search, get, get-labels, get-statements | REST `/v1/search/properties`, `/v1/entities/properties/{id}`, `/v1/entities/properties/{id}/statements`. **Must use the properties endpoint — the items endpoint returns HTTP 400 for P-IDs.** |
 | Statement | get by property filter | REST `/v1/entities/items/{id}/statements?property={P-id}` |
 | Sitelink | get, filter by site | REST `/v1/entities/items/{id}/sitelinks`, `/v1/entities/items/{id}/sitelinks/{site_id}` |
@@ -143,8 +143,9 @@ Adjacent properties with real cross-server value that are **not** external IDs. 
 
 | # | Call | Purpose |
 |:--|:-----|:--------|
-| 1 | `GET /v1/entities/items/{id}` or `GET /v1/entities/properties/{id}` | Full entity data (always all fields — REST API has no server-side field selection) |
-| — | Client-side field filtering | Handler strips unrequested fields from the response before returning. Network payload is always the full entity. |
+| 1 | `GET /v1/entities/items/{id}[?_fields=…]` or `GET /v1/entities/properties/{id}[?_fields=…]` | Entity data, narrowed server-side to the requested fields. `_fields` is omitted entirely when the caller wants everything. |
+| — | Client-side field + language filtering | Shapes the response: language narrowing, which the endpoint cannot do, plus a field filter that keeps the returned shape identical whether or not the fetch was narrowed. |
+| — | Overflow check | Over the byte budget, the field categories are returned as an outline instead of the data. |
 
 When `fields` includes `statements`, the handler may optionally make N additional label-fetch calls for value QIDs (deferred to `wikidata_get_statements` which has dedicated label resolution).
 
@@ -207,16 +208,25 @@ Raw SPARQL forwarded to the endpoint. Hard 60s server timeout; default client ti
 
 ### `wikidata_get_entity`
 
-**Purpose:** Fetch a Wikidata entity by QID or PID with configurable field selection. The REST API returns all fields unconditionally — `fields` filtering is applied client-side before returning to the caller, keeping context budget low. Full entity data for a major item (Q76 Barack Obama) is ~370KB with 410 properties and 340 sitelinks — returning only `labels` and `descriptions` drops this to a few kilobytes.
+**Purpose:** Fetch a Wikidata entity by QID or PID with configurable field selection. `fields` narrows the fetch itself, via the REST API's `?_fields=` parameter, and the client-side filter then shapes what is returned. Full entity data for a major item (Q76 Barack Obama) is 344,114 bytes with 410 properties and 340 sitelinks; `?_fields=labels` answers the same item in 6,703 bytes.
 
 **Routing:** Q-IDs → `GET /v1/entities/items/{id}`. P-IDs → `GET /v1/entities/properties/{id}`. The items endpoint returns HTTP 400 for P-IDs; routing must be done by ID prefix before the request.
 
 **Input schema:**
 - `id: string` — Q-ID (e.g., `"Q76"`) or P-ID (e.g., `"P31"`). Case-insensitive, normalized to uppercase.
-- `fields: array<enum('labels','descriptions','aliases','statements','sitelinks')>` — optional; omit for all fields. Filtering is client-side — the full entity is fetched, then trimmed.
-- `languages: array<string>` — optional language filter for labels/descriptions/aliases; omit for all languages
+- `fields: array<enum('labels','descriptions','aliases','statements','sitelinks')>` — optional; omit for all fields. Forwarded to `?_fields=`, so it narrows the fetch as well as the response.
+- `languages: array<string>` — optional language filter for labels/descriptions/aliases; omit for all languages. Client-side: the entity endpoint has no language parameter.
 
-**Output:** Entity data with only the requested fields. Each field is returned as-is from the API with no truncation. The `statements` field preserves full qualifier and reference structure. P-IDs include a `data_type` field; `sitelinks` is absent on property entities.
+**Output:** Entity data with only the requested fields, never truncated. The `statements` field preserves full qualifier and reference structure. P-IDs include a `data_type` field; `sitelinks` is absent on property entities.
+
+Over the byte budget the response switches to `kind: "outline"` — the field categories with their sizes, largest first — and `retrieval_notice` names how to fetch each one. Sections are field categories rather than top-level result keys, since an outline naming `id` or `fieldsReturned` would advertise a re-call `fields` rejects.
+
+The governing rule is that **following the notice literally must make progress** — what it says to do next has to return something better than what the caller just read, never the identical outline. Two ways to break that, both closed:
+
+1. *Pointing at a category `fields` cannot deliver.* One over budget on its own returns the same overflow, so it is redirected to a lever with finer granularity: `statements` → `wikidata_get_statements` (`properties`, by P-ID), `sitelinks` → `wikidata_get_sitelinks` (`sites`, by site code), the language-keyed maps → this tool's own `languages`. On Q30 that redirects `statements` (793,825 bytes) and `sitelinks` (59,631).
+2. *Naming a set that only fits piecewise.* Sizes are additive, so enumerating every category that fits individually can name a re-call that cannot succeed — Q30's `labels` + `descriptions` + `aliases` are 10,431 + 6,848 + 12,447 = 29,726 against 24,000. That notice returns the same outline, which returns the same notice: a closed loop, reachable straight from the default `get_entity(Q30)` path. So the notice packs a subset measured to fit and defers the remainder to a further call.
+
+Both checks go through `sizeOf`, the same serialization the handler uses to decide overflow, so a suggested re-call is validated against the exact predicate that will judge it — the named set provably returns `kind: "full"` in one step, and the first candidate always fits because a category that cannot be delivered alone was already routed elsewhere. The set is emitted as a literal array (`fields:["aliases","labels"]`) rather than a constraint to satisfy ("keep the total under 24000 bytes"), because the caller most likely to loop here is the one least likely to do the arithmetic.
 
 **Errors:**
 - `entity_not_found` (`NotFound`): no entity exists at this ID. REST answers an unassigned but well-formed ID (`Q99999999`) with HTTP 404 `resource-not-found`, and a syntactically valid but out-of-range ID (`Q999999999999`) with HTTP 400 `invalid-path-parameter` — both mean "no such entity" to a caller and map to this reason.
@@ -261,11 +271,13 @@ Both arrive as HTTP 200 — the error rides in the body, not the status.
 
 **Input schema:**
 - `id: string` — Q-ID of the item or P-ID of a property. Routes to `/v1/entities/items/{id}/statements` for Q-IDs and `/v1/entities/properties/{id}/statements` for P-IDs.
-- `properties: array<string>` — P-IDs to fetch (e.g., `["P31", "P569", "P27"]`); omit for all properties (large)
+- `properties: array<string>` — P-IDs to fetch (e.g., `["P31", "P569", "P27"]`); omit for all properties. Unfiltered, a well-connected item overflows — see below.
 - `language: string` — language for label resolution, default `'en'`
 - `resolve_labels: boolean` — resolve value QIDs to labels, default `true`
 
 **Output:** Map of property ID → array of statements. Each statement includes `rank`, `value` (with resolved label if applicable), `qualifiers` (similarly resolved), and a trimmed `references` summary.
+
+Over the byte budget the response switches to `kind: "outline"` — every available P-ID with its serialized size, largest first — and the caller re-calls with `properties:[…]`. Unfiltered, Q30 carries 467 properties across 1,717 statements and serializes to 519,077 characters, past what a client can accept at all; the outline of the same call is ~14KB. Sections are the statement map's own keys, so they are already P-IDs — the vocabulary `properties` takes — and the outline needs no new input parameter. Size is measured after normalization and label resolution, because that is the payload the caller actually receives. An entity whose statements sit under a single P-ID is returned whole even when oversized: below two sections there is nothing to choose between, and the only re-call an outline could offer would return the same bytes. Sub-section outlining (splitting one property's statement list) is out of scope.
 
 Statement value normalization by data type:
 - `wikibase-item` values: `{ qid, label }` (label resolved if `resolve_labels: true`)
@@ -383,7 +395,7 @@ Key endpoints used:
 |:---------|:-------|:--------|
 | `/search/items?q=…&language=…&limit=…` | GET | Entity text search |
 | `/search/properties?q=…&language=…&limit=…` | GET | Property text search |
-| `/entities/items/{id}` | GET | Full item data (all fields always returned — no server-side field selection; filtering must be done client-side) |
+| `/entities/items/{id}` | GET | Item data. `?_fields=` narrows it server-side (`type`, `labels`, `descriptions`, `aliases`, `statements`, `sitelinks`); `id` is always returned and is rejected as a selector. Note `?fields=` — no underscore — is silently ignored. |
 | `/entities/items/{id}/labels` | GET | All labels |
 | `/entities/items/{id}/descriptions/{lang}` | GET | Single-language description |
 | `/entities/items/{id}/statements?property={pid}` | GET | Filtered statements |
@@ -433,7 +445,8 @@ Wikimedia blocks requests without a valid User-Agent. Required format per policy
 
 - **SPARQL 60s timeout is hard.** Complex queries touching millions of triples regularly time out. The server can't extend this — it's enforced by Wikimedia infrastructure. Agents must write LIMIT-bounded queries.
 - **No batch entity fetch via REST.** The REST API has no multi-ID endpoint. Batch label resolution uses the MediaWiki API (`wbgetentities`), not REST. Fetching N full entities requires N REST calls — the server uses parallel fetching where possible.
-- **No server-side field selection on entity fetch.** The REST API ignores `?fields=` query parameters and always returns the full entity payload (~370KB for major items). The `fields` parameter on `wikidata_get_entity` filters client-side — the network cost is unavoidable.
+- **`_fields` is spelled with an underscore, and the accepted set differs per endpoint.** `?fields=` is silently ignored; only `?_fields=` narrows. The items endpoint takes `type`/`labels`/`descriptions`/`aliases`/`statements`/`sitelinks`, the properties endpoint takes `type`/`data_type`/`labels`/`descriptions`/`aliases`/`statements` — `sitelinks` and `data_type` are each valid on exactly one of them, `id` on neither. An unaccepted value answers HTTP 400 `invalid-query-parameter`, which is the same status an out-of-range ID draws and which `isEntityNotFoundError()` reads as "no such entity". `fetchEntity()` therefore intersects the caller's fields against the endpoint's set instead of forwarding them, or a property asked for `sitelinks` would be reported as missing.
+- **No language selection on entity fetch.** The entity endpoint returns exactly the language keys an entity carries, with no `languages` or `languagefallback` parameter, so language narrowing and `mul` fallback stay client-side. (The MediaWiki batch path used by `wikidata_get_labels` does have `languagefallback=1`.)
 - **Statement value payloads vary by data type.** `wikibase-item`, `time`, `quantity`, `string`, `external-id`, `url`, `monolingualtext`, `globe-coordinate`, `math`, `musical-notation`, `tabular-data`, `geo-shape` — 12+ data types each with different value shapes. The server normalizes to a consistent structure per type, but callers should expect `type` to vary.
 - **External ID case sensitivity.** Wikidata stores DOIs uppercase and other external IDs in canonical forms. The `wikidata_resolve_external_id` handler normalizes known cases (whitespace trimming, resolver-URL prefix stripping, DOI uppercasing, PMID prefix stripping, ORCID hyphen normalization), but unlisted properties use the value as-is.
 - **Wikidata data quality is uneven.** Popular entities (Barack Obama, Albert Einstein) are well-maintained. Long-tail items may have sparse labels, missing descriptions, or zero sitelinks. The server faithfully reports what's there — it does not synthesize missing data.
@@ -450,7 +463,11 @@ Wikimedia blocks requests without a valid User-Agent. Required format per policy
 Chose the Wikidata REST API (`/w/rest.php/wikibase/v1/`) as the primary client for entity lookups and search. The REST API is versioned (v1.5), has a clean OpenAPI spec, and returns structured JSON without the additional `entities` envelope wrapping the MediaWiki API uses. Exception: batch label resolution uses `wbgetentities` because the REST API has no multi-ID label endpoint — individual REST label calls would be N+1.
 
 **Field selection via `fields` parameter on `wikidata_get_entity`**
-A full entity payload for a major item (Barack Obama Q76) is ~370KB with 410 properties, 113 labels, 242 descriptions, and 340 sitelinks. The REST API has no server-side field selection — `?fields=` query parameters are silently ignored, and the full entity is always returned over the wire. The `fields` parameter on this tool is implemented as client-side filtering: the handler fetches the full entity, then strips unrequested fields before returning to the caller. The network cost is fixed; the context budget benefit to the caller is real.
+A full entity payload for a major item (Barack Obama Q76) is 344,114 bytes with 410 properties, 113 labels, 242 descriptions, and 340 sitelinks. `fields` is forwarded to the REST API's `?_fields=` parameter, so it narrows the fetch and not just the response: the same item is 6,703 bytes with `?_fields=labels`, and Q42 is 16,986 with `?_fields=labels,descriptions`.
+
+This tool originally filtered client-side only, on the finding that the API ignored a field parameter. That finding was real but keyed on the wrong spelling — `?fields=` is accepted and silently ignored, `?_fields=` is honoured. The underscore is the whole difference, and `fetchPropertyDataType()` had been relying on the working spelling against the properties endpoint the entire time.
+
+The client-side filter stays. It does work `_fields` cannot — language narrowing, `mul` fallback, sitelink reshaping — and it keeps the returned shape identical whether or not the fetch was narrowed, which is what lets the forwarding be a pure bandwidth win rather than a contract change. Two constraints make forwarding non-blind: the endpoint drops `type` unless asked for, and its accepted set is endpoint-specific, so `fetchEntity()` always appends `type` (plus `data_type` for properties) and intersects the rest against the endpoint's set.
 
 **`wikidata_get_labels` as a dedicated tool**
 Label resolution is a separate concern from entity data. Agents running SPARQL queries routinely get back sets of QIDs and need to humanize them. A dedicated `wikidata_get_labels` batches up to 50 QIDs in one MediaWiki API call rather than N REST calls. This pattern — "get QIDs from SPARQL, then resolve labels" — is the most common two-step workflow in practice.
@@ -460,6 +477,24 @@ The REST API has no "find entity by external ID value" endpoint — you can't do
 
 **`wikidata_sparql_query` injects label SERVICE automatically**
 The `SERVICE wikibase:label { bd:serviceParam wikibase:language "en" }` block is required in virtually every practical SPARQL query that uses `?itemLabel` variables. Making agents write this boilerplate for every query is friction with no upside. The service layer injects it when `language` is set (the default) and the query doesn't already include it.
+
+The injection point is the WHERE block's closing brace, found by matching the last `}` that is followed only by what the SPARQL 1.1 grammar permits after the WHERE clause — the solution modifiers (`LIMIT`/`OFFSET`/`ORDER BY`/`GROUP BY`/`HAVING`) or a `ValuesClause` — which is then re-attached after the injection. Recognizing every one of those trailing productions is load-bearing rather than cosmetic: each is a brace-bearing or brace-following construct that can end a query, and a keyword the pattern does not know makes the match slide onto the wrong `}`. A trailing `VALUES ?t { wd:Q5 }` ends the query with its own brace, and injecting there puts a graph pattern inside a data block that accepts only constant terms — a parse error, not a subtly wrong result. Coverage lives in `tests/services/wikidata-sparql-service.test.ts`, which asserts the prepared text sent upstream rather than the private rewriter.
+
+**Overflow returns an outline, not a truncated payload**
+`wikidata_get_statements` and `wikidata_get_entity` can both produce a response too large for a client to accept — 519,077 and 793,897 characters respectively for Q30, hard failures rather than degraded results. Both return an outline rather than a per-tool cap. A cap has to answer which statements survive truncation, and there is no honest answer; an outline drops nothing and hands the choice to the caller, who is the only party that knows what it needs. The fit is that both tools already own the lever the outline points at — `properties` for one, `fields` for the other — so neither needs a new input parameter, only a notice naming the existing one in place of the default `sections:[…]` wording. The budget is `DEFAULT_OUTLINE_BUDGET_BYTES` (24,000), deliberately a code constant rather than an env var, since a deploy-tunable threshold would drift a tool's output *shape* across environments.
+
+**An outline may never point at a section it measured as over budget**
+The two tools take the overflow decision differently, and the split is deliberate.
+
+`wikidata_get_statements` uses `outlineOnOverflow` from `@cyanheads/mcp-ts-core/utils` whole. Its short-circuit — return a document with fewer than two sections intact, even over budget — is exactly right there: the only re-call available is the tool's own `properties`, so an outline of one section would cost a round-trip that returns the same bytes.
+
+`wikidata_get_entity` measures itself instead (still using the module's `OUTLINE_VARIANT`, `formatOutline`, and budget constant), because that short-circuit assumes the re-call lever is the tool's own selector and here it is not. Every oversized category narrows through a lever `fields` has no vocabulary for — `statements` by P-ID through `wikidata_get_statements`, `sitelinks` by site code through `wikidata_get_sitelinks`, the language-keyed maps through `languages`. The round-trip redirects rather than repeats, so it is worth taking: short-circuiting it returned the ~793KB `fields: ["statements"]` payload the outline exists to prevent.
+
+The same reasoning governs the notice, and generalizes past the single-section case. A multi-section outline that lists `statements — 793,825 bytes` and tells the caller to re-call `fields:["statements"]` is a confident pointer into the failure — worse than no outline, since an agent following it walks straight in. `sitelinks` on Q30 (59,631 bytes) is the same case, not a special one. And an outline naming every category that fits individually, when their total does not, is the same defect once more: advice that cannot work, this time looping instead of overflowing.
+
+The rule that covers all three: a notice may only name a call this tool has already measured as one that will return data. That is a property of the guidance, not of the payload — the tools exist so a calling agent gets guidance that works, and the agent most likely to follow a notice literally is the one least able to recover when it is wrong.
+
+Both tools model the two modes as one flat `z.object` with a `kind` discriminator and presence-based optional arms, because `tool()` rejects a `z.discriminatedUnion` output. Their `format()` renders each arm on field presence and never branches on `kind`: format-parity injects a single synthetic sample with every optional field populated at once, so a mutually-exclusive branch would leave the untaken arm unrendered. The re-call notice is named `retrieval_notice` — it is outline payload the agent acts on, and enrichment merges *after* `output.parse`, so it could only add to a fat result, never replace it with an outline.
 
 **`wikidata_get_statements` resolves value QIDs to labels by default**
 Raw statement data uses QIDs for item-type values (`"content": "Q76"`). Without label resolution, the agent gets back opaque identifiers it can't act on without a follow-up call. `resolve_labels: true` (the default) batches the value QID → label resolution into the same handler, eliminating a round trip. Callers can opt out for performance when they only need the QIDs.

@@ -162,11 +162,23 @@ export class WikidataSparqlService {
     // Inject label SERVICE if language is set and the SERVICE block is absent
     const hasLabelService = /SERVICE\s+wikibase:label/i.test(query);
     if (language && !hasLabelService) {
-      // Insert before the final } — then re-attach any trailing solution modifiers
-      // (LIMIT/OFFSET/ORDER BY/GROUP BY/HAVING). The tail capture is optional so this
-      // single pattern handles both cases: modifiers present and not present.
+      /**
+       * Insert before the WHERE block's closing `}` — then re-attach whatever trails it.
+       *
+       * The tail is anything the SPARQL 1.1 grammar allows after the WHERE clause: the
+       * solution modifiers (LIMIT/OFFSET/ORDER BY/GROUP BY/HAVING) and `ValuesClause`, a
+       * distinct production that may follow them. Both must be recognized, because the
+       * alternation is what stops the match from sliding onto a later `}`: a trailing
+       * `VALUES ?t { wd:Q5 }` ends the query with a brace of its own, and matching *that*
+       * one drops the SERVICE inside the VALUES data block, which accepts only constant
+       * terms. A VALUES clause *inside* the WHERE block needs no special case — its brace
+       * is followed by neither a keyword nor end-of-query, so the match skips past it.
+       *
+       * The tail capture stays optional, so this one pattern also covers a query that ends
+       * at the WHERE block with nothing after it.
+       */
       query = query.replace(
-        /(\})\s*((?:(?:LIMIT|OFFSET|ORDER\s+BY|GROUP\s+BY|HAVING)\b)[\s\S]*)?$/i,
+        /(\})\s*((?:(?:LIMIT|OFFSET|ORDER\s+BY|GROUP\s+BY|HAVING|VALUES)\b)[\s\S]*)?$/i,
         (_, brace, tail) =>
           tail?.trim()
             ? `  ${LABEL_SERVICE_SNIPPET(language)}\n${brace}\n${tail.trimStart()}`

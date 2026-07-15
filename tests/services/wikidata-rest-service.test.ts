@@ -291,6 +291,154 @@ describe('WikidataRestService', () => {
     });
   });
 
+  /**
+   * #26: the REST API honours `?_fields=` (the `?fields=` spelling is accepted and silently
+   * ignored). Narrowing is worth 51x on a major item — `items/Q76` is 344,114 bytes whole and
+   * 6,703 with `_fields=labels`.
+   */
+  describe('fetchEntity — server-side field selection', () => {
+    it('forwards the requested fields as _fields', async () => {
+      respondWith({ id: 'Q76', type: 'item', labels: { en: 'Barack Obama' } });
+
+      const svc = makeService();
+      await svc.fetchEntity('Q76', createMockContext(), ['labels', 'descriptions']);
+
+      expect(urlOf(0)).toContain('_fields=');
+      expect(decodeURIComponent(urlOf(0))).toContain('labels');
+      expect(decodeURIComponent(urlOf(0))).toContain('descriptions');
+    });
+
+    it('fetches the whole entity when no fields are requested', async () => {
+      respondWith({ id: 'Q76', type: 'item' });
+
+      const svc = makeService();
+      await svc.fetchEntity('Q76', createMockContext());
+
+      expect(urlOf(0)).not.toContain('_fields');
+      expect(urlOf(0)).toContain('/entities/items/Q76');
+    });
+
+    it('fetches the whole entity for an empty fields array', async () => {
+      respondWith({ id: 'Q76', type: 'item' });
+
+      const svc = makeService();
+      await svc.fetchEntity('Q76', createMockContext(), []);
+
+      expect(urlOf(0)).not.toContain('_fields');
+    });
+
+    /**
+     * The endpoint drops `type` unless it is asked for — `?_fields=labels` answers with
+     * `labels` and `id` only. Every caller needs `type`, and get_entity declares it as a
+     * required output field, so it rides along on every narrowed fetch.
+     */
+    it('always requests type, which the endpoint otherwise omits', async () => {
+      respondWith({ id: 'Q76', type: 'item', labels: { en: 'Barack Obama' } });
+
+      const svc = makeService();
+      await svc.fetchEntity('Q76', createMockContext(), ['labels']);
+
+      expect(decodeURIComponent(urlOf(0))).toContain('type');
+    });
+
+    /** `id` is rejected as a selector (400) but returned on every response regardless. */
+    it('never requests id, which the endpoint rejects as a selector', async () => {
+      respondWith({ id: 'Q76', type: 'item', labels: { en: 'Barack Obama' } });
+
+      const svc = makeService();
+      await svc.fetchEntity('Q76', createMockContext(), ['labels', 'id']);
+
+      const fields = new URL(urlOf(0)).searchParams.get('_fields')?.split(',') ?? [];
+      expect(fields).not.toContain('id');
+      expect(fields).toContain('labels');
+    });
+
+    it('always requests data_type for a property, keeping the narrowed shape intact', async () => {
+      respondWith({ id: 'P31', type: 'property', data_type: 'wikibase-item' });
+
+      const svc = makeService();
+      await svc.fetchEntity('P31', createMockContext(), ['labels']);
+
+      const fields = new URL(urlOf(0)).searchParams.get('_fields')?.split(',') ?? [];
+      expect(fields).toContain('data_type');
+      expect(urlOf(0)).toContain('/entities/properties/P31');
+    });
+
+    /**
+     * The two endpoints accept different field sets, and an endpoint answers a value it does
+     * not know with 400 — indistinguishable from an out-of-range ID's 400, which
+     * `isEntityNotFoundError()` maps to "does not exist". Forwarding blind would report a
+     * real entity as missing, so unaccepted values are dropped instead.
+     */
+    it('drops sitelinks for a property, which the properties endpoint rejects', async () => {
+      respondWith({ id: 'P31', type: 'property', data_type: 'wikibase-item' });
+
+      const svc = makeService();
+      await svc.fetchEntity('P31', createMockContext(), ['sitelinks']);
+
+      const fields = new URL(urlOf(0)).searchParams.get('_fields')?.split(',') ?? [];
+      expect(fields).not.toContain('sitelinks');
+      // Still narrowed to the always-kept metadata rather than falling back to a full fetch.
+      expect(fields.sort()).toEqual(['data_type', 'type']);
+    });
+
+    it('drops data_type for an item, which the items endpoint rejects', async () => {
+      respondWith({ id: 'Q76', type: 'item' });
+
+      const svc = makeService();
+      await svc.fetchEntity('Q76', createMockContext(), ['labels', 'data_type']);
+
+      const fields = new URL(urlOf(0)).searchParams.get('_fields')?.split(',') ?? [];
+      expect(fields).not.toContain('data_type');
+      expect(fields.sort()).toEqual(['labels', 'type']);
+    });
+
+    it('forwards every item field the endpoint accepts', async () => {
+      respondWith({ id: 'Q76', type: 'item' });
+
+      const svc = makeService();
+      await svc.fetchEntity('Q76', createMockContext(), [
+        'labels',
+        'descriptions',
+        'aliases',
+        'statements',
+        'sitelinks',
+      ]);
+
+      const fields = new URL(urlOf(0)).searchParams.get('_fields')?.split(',') ?? [];
+      expect(fields.sort()).toEqual([
+        'aliases',
+        'descriptions',
+        'labels',
+        'sitelinks',
+        'statements',
+        'type',
+      ]);
+    });
+
+    it('does not repeat a field the caller listed twice', async () => {
+      respondWith({ id: 'Q76', type: 'item' });
+
+      const svc = makeService();
+      await svc.fetchEntity('Q76', createMockContext(), ['labels', 'labels', 'type']);
+
+      const fields = new URL(urlOf(0)).searchParams.get('_fields')?.split(',') ?? [];
+      expect(fields.sort()).toEqual(['labels', 'type']);
+    });
+
+    /** Narrowing must not disturb the not-found classification the tools depend on. */
+    it('still classifies a narrowed fetch of an unassigned ID as not-found', async () => {
+      respondWithStatus(404, 'Not Found', '{"code":"resource-not-found"}');
+
+      const svc = makeService();
+      const err = await svc
+        .fetchEntity('Q99999999', createMockContext(), ['labels'])
+        .catch((e: unknown) => e);
+
+      expect(isEntityNotFoundError(err)).toBe(true);
+    });
+  });
+
   describe('fetchPropertyDataType', () => {
     it('requests only data_type and returns it', async () => {
       respondWith({ id: 'P356', data_type: 'external-id' });

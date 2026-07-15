@@ -6,6 +6,12 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  DEFAULT_OUTLINE_BUDGET_BYTES,
+  formatOutline,
+  OUTLINE_VARIANT,
+  type SectionMeta,
+} from '@cyanheads/mcp-ts-core/utils';
+import {
   getWikidataRestService,
   isEntityNotFoundError,
   isPId,
@@ -16,14 +22,122 @@ import {
 
 const FIELD_ENUM = z.enum(['labels', 'descriptions', 'aliases', 'statements', 'sitelinks']);
 
+/**
+ * How to retrieve a category whose own size exceeds the budget, which `fields` therefore
+ * cannot deliver — re-calling `fields` with it returns the same overflowing payload.
+ *
+ * Every category has a narrowing lever at a granularity `fields` has no vocabulary for: the
+ * two collection-shaped ones each have a sibling tool that selects members, and the
+ * language-keyed maps narrow through this tool's own `languages`.
+ */
+function routeFor(section: string): string {
+  switch (section) {
+    case 'statements':
+      return 'wikidata_get_statements with properties:[...] to select individual P-IDs';
+    case 'sitelinks':
+      return 'wikidata_get_sitelinks with sites:[...] to select individual site codes';
+    default:
+      return 'the languages parameter to narrow to specific language codes';
+  }
+}
+
+/** One section per field category, sized by serialized length, largest first. */
+function sectionsOf(categories: Record<string, unknown>): SectionMeta[] {
+  return Object.entries(categories)
+    .map(([name, value]) => ({ name, bytes: JSON.stringify(value).length }))
+    .sort((a, b) => b.bytes - a.bytes);
+}
+
+/**
+ * Serialized size of the response a `fields:[names]` re-call would produce — the same
+ * measurement the handler applies to decide overflow. Every claim the notice makes about a
+ * re-call is checked with this, so a suggested call cannot come back as the outline the
+ * caller just read.
+ */
+function sizeOf(categories: Record<string, unknown>, names: string[]): number {
+  return JSON.stringify(Object.fromEntries(names.map((k) => [k, categories[k]]))).length;
+}
+
+/**
+ * Largest subset of `names`, in the order given, whose combined size fits the budget.
+ * First-fit over the size-sorted sections: take each one that still fits alongside those
+ * already taken, skip the rest.
+ *
+ * Combined is the operative word. Sections that each fit individually can overflow together
+ * — Q30's labels/descriptions/aliases are 10,431 + 6,848 + 12,447 = 29,726 against a 24,000
+ * budget — so enumerating everything that fits on its own would name a re-call that returns
+ * this same outline, forever. Callers are given a set that terminates.
+ */
+function packWithinBudget(categories: Record<string, unknown>, names: string[]): string[] {
+  const chosen: string[] = [];
+  for (const name of names) {
+    if (sizeOf(categories, [...chosen, name]) <= DEFAULT_OUTLINE_BUDGET_BYTES) chosen.push(name);
+  }
+  return chosen;
+}
+
+/**
+ * Builds the re-call notice. Following it literally must make progress, so every route it
+ * names is one this tool has verified will return data:
+ *
+ * - A category that cannot be returned even alone is redirected to a tool that can narrow
+ *   below a whole category (see routeFor). `fields` would hand back the same overflow.
+ * - The rest are packed into one `fields` set measured to fit, named as a literal array the
+ *   caller can copy. Anything left over is deferred to a further call rather than folded
+ *   into a set that would not fit.
+ */
+function buildNotice(categories: Record<string, unknown>, sections: SectionMeta[]): string {
+  /**
+   * Deliverable alone is the k=1 case of the re-call's own budget check — not `bytes <=
+   * budget`, which ignores the key overhead the response carries and would let a knife-edge
+   * category be offered through `fields` and bounce straight back as an outline.
+   */
+  const deliverable: SectionMeta[] = [];
+  const oversized: SectionMeta[] = [];
+  for (const section of sections) {
+    const fits = sizeOf(categories, [section.name]) <= DEFAULT_OUTLINE_BUDGET_BYTES;
+    (fits ? deliverable : oversized).push(section);
+  }
+
+  // The first deliverable section fits by definition, so this is never empty when one exists.
+  const chosen = packWithinBudget(
+    categories,
+    deliverable.map((s) => s.name),
+  );
+  const deferred = deliverable.filter((s) => !chosen.includes(s.name)).map((s) => s.name);
+
+  const parts = ['Entity too large to inline.'];
+  if (chosen.length > 0) {
+    parts.push(
+      `Re-call wikidata_get_entity with the same id plus fields:${JSON.stringify(chosen)} — that set fits the ${DEFAULT_OUTLINE_BUDGET_BYTES}-byte budget and returns the data.`,
+    );
+  }
+  if (deferred.length > 0) {
+    parts.push(`Request ${deferred.join(' and ')} in a further call; together they would not fit.`);
+  }
+  for (const section of oversized) {
+    parts.push(
+      `${section.name} is ${section.bytes} bytes on its own — fields cannot deliver it; use ${routeFor(section.name)}.`,
+    );
+  }
+  return parts.join(' ');
+}
+
 export const wikidataGetEntity = tool('wikidata_get_entity', {
   title: 'Get Wikidata Entity',
   description:
     'Fetch a Wikidata entity (item or property) by QID or PID. ' +
-    'Use the fields parameter to trim what is returned to the caller — major items can be large. ' +
-    'Omit fields to get all data. ' +
+    'The fields parameter narrows the upstream fetch, not just the response — asking for labels alone ' +
+    'costs a fraction of the whole entity, so name the fields you need. ' +
+    'Omit fields for all data; a well-connected item is large enough to overflow, and an oversized entity ' +
+    'returns kind: "outline" — the field categories with their byte sizes — instead of the data. ' +
+    'Follow its retrieval_notice literally rather than picking from sections yourself — it names a fields set ' +
+    'already measured to fit, since category sizes are additive and requesting them all would overflow again; ' +
+    'for a category too large to deliver whole (statements or sitelinks on a major item) it names the sibling ' +
+    'tool that can narrow it. ' +
     'Q-IDs (e.g. Q76) fetch items; P-IDs (e.g. P31) fetch properties from the correct endpoint automatically. ' +
-    'Use wikidata_get_statements for deep claim traversal with label resolution.',
+    "Use wikidata_get_statements for deep claim traversal with label resolution, and whenever an entity's " +
+    'statements are large — its properties parameter selects individual P-IDs, granularity fields does not carry.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -37,7 +151,8 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       .array(FIELD_ENUM)
       .optional()
       .describe(
-        'Fields to include in the response. Options: "labels", "descriptions", "aliases", "statements", "sitelinks". ' +
+        'Fields to include. Options: "labels", "descriptions", "aliases", "statements", "sitelinks". ' +
+          'Narrows the upstream fetch as well as the response, so a narrow selection is markedly cheaper. ' +
           'Omit for all fields.',
       ),
     languages: z
@@ -53,6 +168,13 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
   output: z.object({
     id: z.string().describe('Normalized entity ID (e.g., "Q76" or "P31").'),
     type: z.string().describe('Entity type: "item" or "property".'),
+    kind: z
+      .enum(['full', 'outline'])
+      .describe(
+        'full — the requested field categories carry their data. outline — the entity overflowed the ' +
+          'inline byte budget, so sections lists the categories with their byte sizes instead, and ' +
+          'retrieval_notice names how to fetch each one. The id and type are present either way.',
+      ),
     data_type: z
       .string()
       .optional()
@@ -81,7 +203,9 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       .record(z.string(), z.array(z.object({}).passthrough()))
       .optional()
       .describe(
-        'Map of property ID to array of raw statement objects. Use wikidata_get_statements for resolved claims with label resolution.',
+        'Map of property ID to array of raw statement objects. Use wikidata_get_statements for resolved claims ' +
+          "with label resolution, and whenever this entity's statements are large — its properties parameter " +
+          'selects individual P-IDs, granularity fields does not carry.',
       ),
     // Sitelink values are from a dynamic external API — passthrough preserves all nested fields
     // (title, url, badges) in structuredContent without aspirational per-field typing.
@@ -91,7 +215,34 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       .describe(
         'Map of site code (e.g., "enwiki") to sitelink metadata with title, url, and badges fields.',
       ),
-    fieldsReturned: z.array(z.string()).describe('Which fields are included in this response.'),
+    fieldsReturned: z
+      .array(z.string())
+      .describe(
+        'Which fields were requested. In outline mode these are the categories the outline covers, not data returned.',
+      ),
+    sections: z
+      .array(
+        OUTLINE_VARIANT.shape.sections.element.describe(
+          'An available field category — its name and the serialized byte size of its data.',
+        ),
+      )
+      .optional()
+      .describe(
+        "Present when kind = outline: the entity's field categories, largest first, each with its byte " +
+          'size. Sizes are additive — a set of categories is only retrievable together if their total fits ' +
+          'the budget, so follow retrieval_notice rather than requesting every name listed here.',
+      ),
+    // Named retrieval_notice, not notice: it is part of the outline payload the agent acts
+    // on, not additive agent-facing context. Enrichment is merged *after* output.parse and
+    // so can only add to a fat result, never replace it with an outline.
+    retrieval_notice: OUTLINE_VARIANT.shape.notice
+      .optional()
+      .describe(
+        'Present when kind = outline: the next call to make, and the authoritative one to follow. It names a ' +
+          'literal fields set already measured to fit the budget, defers any category that would not fit ' +
+          'alongside it, and for a category too large for fields to deliver at all names the sibling tool ' +
+          '(wikidata_get_statements, wikidata_get_sitelinks) or the languages parameter that can narrow it.',
+      ),
   }),
 
   errors: [
@@ -130,7 +281,7 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
 
     let entity: Awaited<ReturnType<typeof svc.fetchEntity>>;
     try {
-      entity = await svc.fetchEntity(id, ctx);
+      entity = await svc.fetchEntity(id, ctx, input.fields);
     } catch (err) {
       if (isEntityNotFoundError(err)) {
         throw ctx.fail('entity_not_found', `No entity found for ID "${id}".`, {
@@ -163,31 +314,40 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       return Object.keys(filtered).length ? filtered : undefined;
     };
 
-    const result: Record<string, unknown> = {
+    /** Cheap metadata — kept in both arms; the overflow primitive returns only kind/sections/notice. */
+    const base: Record<string, unknown> = {
       id: entity.id,
       type: entity.type,
       fieldsReturned: [...requestedFields],
+      ...(entity.data_type ? { data_type: entity.data_type } : {}),
     };
 
-    if (entity.data_type) result.data_type = entity.data_type;
+    /**
+     * The field categories, kept apart from the envelope above because they are the only
+     * keys `fields` can name — which makes them exactly the sections an outline may offer,
+     * and the default extractor the right one. Outlining the whole result instead would
+     * advertise `id`/`type`/`fieldsReturned` as sections, and a re-call naming those is not
+     * something `fields` accepts.
+     */
+    const categories: Record<string, unknown> = {};
 
     if (requestedFields.has('labels')) {
       const labels = filterLangs(entity.labels);
-      if (labels) result.labels = labels;
+      if (labels) categories.labels = labels;
     }
     if (requestedFields.has('descriptions')) {
       const descriptions = filterLangs(entity.descriptions);
-      if (descriptions) result.descriptions = descriptions;
+      if (descriptions) categories.descriptions = descriptions;
     }
     if (requestedFields.has('aliases')) {
       const aliases = filterLangs(entity.aliases);
-      if (aliases) result.aliases = aliases;
+      if (aliases) categories.aliases = aliases;
     }
     if (requestedFields.has('statements') && entity.statements) {
-      result.statements = entity.statements;
+      categories.statements = entity.statements;
     }
     if (requestedFields.has('sitelinks') && entity.sitelinks) {
-      result.sitelinks = Object.fromEntries(
+      categories.sitelinks = Object.fromEntries(
         Object.entries(entity.sitelinks).map(([site, sl]) => [
           site,
           {
@@ -199,16 +359,50 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       );
     }
 
-    // The output schema defines the full shape — result satisfies it at runtime
-    // even though the TypeScript type is widened to Record<string, unknown>.
-    return result as never;
+    /**
+     * Outline whenever the categories overflow — including the single-section case that
+     * `outlineOnOverflow` deliberately short-circuits past, which is why this tool measures
+     * itself rather than delegating the decision.
+     *
+     * The primitive returns a document whole below two sections because an outline offering
+     * one section would cost a round-trip whose only possible re-call returns the same
+     * bytes. That reasoning holds only when the re-call lever is the tool's own selector.
+     * Here it is not: every oversized category narrows through a lever `fields` has no
+     * vocabulary for (see routeFor). The round-trip redirects rather than repeats, so
+     * short-circuiting it would hand back the exact payload the outline exists to prevent —
+     * `fields: ["statements"]` on a major item is ~793KB, past what a client can accept.
+     *
+     * wikidata_get_statements keeps the primitive: there the only lever IS its own
+     * `properties`, which is the case the short-circuit was written for.
+     */
+    // The output schema defines the full shape — these satisfy it at runtime even though
+    // the TypeScript type is widened to Record<string, unknown>.
+    if (JSON.stringify(categories).length > DEFAULT_OUTLINE_BUDGET_BYTES) {
+      const sections = sectionsOf(categories);
+      ctx.log.info('Entity overflowed — returning outline', { id, sections: sections.length });
+      return {
+        ...base,
+        kind: 'outline',
+        sections,
+        retrieval_notice: buildNotice(categories, sections),
+      } as never;
+    }
+
+    return { ...base, ...categories, kind: 'full' } as never;
   },
 
+  /**
+   * Each arm renders on the presence of its own fields, never by branching on `kind` —
+   * format-parity injects one synthetic sample with every optional field populated at once,
+   * so a mutually-exclusive branch would leave the untaken arm's fields unrendered.
+   */
   format: (result) => {
     const lines: string[] = [`## ${result.id} (${result.type})`];
 
     if (result.data_type) lines.push(`**Data type:** ${result.data_type}`);
-    lines.push(`**Fields returned:** ${result.fieldsReturned.join(', ')}`);
+    lines.push(
+      `**Fields returned:** ${result.fieldsReturned.join(', ')} | **Response:** ${result.kind}`,
+    );
 
     if (result.labels) {
       const enLabel = result.labels.en;
@@ -271,6 +465,14 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       if (enwiki) lines.push(`**Wikipedia (en):** ${enwiki.url ?? enwiki.title}`);
     }
 
-    return [{ type: 'text', text: lines.join('\n') }];
+    const outlineBlocks = result.sections
+      ? formatOutline({
+          kind: 'outline',
+          sections: result.sections,
+          notice: result.retrieval_notice ?? '',
+        })
+      : [];
+
+    return [{ type: 'text', text: lines.join('\n') }, ...outlineBlocks];
   },
 });

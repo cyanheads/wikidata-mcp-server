@@ -169,6 +169,7 @@ describe('wikidataGetEntity', () => {
     const output = {
       id: 'Q76',
       type: 'item',
+      kind: 'full' as const,
       labels: { en: 'Barack Obama', de: 'Barack Obama' },
       descriptions: { en: '44th U.S. President' },
       aliases: { en: ['Obama', 'President Obama'] as unknown as string[] },
@@ -317,6 +318,7 @@ describe('wikidataGetEntity', () => {
     const blocks = wikidataGetEntity.format!({
       id: 'Q76',
       type: 'item',
+      kind: 'full' as const,
       descriptions,
       fieldsReturned: ['descriptions'],
     });
@@ -329,6 +331,7 @@ describe('wikidataGetEntity', () => {
     const blocks = wikidataGetEntity.format!({
       id: 'Q76',
       type: 'item',
+      kind: 'full' as const,
       descriptions: { en: 'desc-en', de: 'desc-de' },
       fieldsReturned: ['descriptions'],
     });
@@ -345,6 +348,7 @@ describe('wikidataGetEntity', () => {
     const blocks = wikidataGetEntity.format!({
       id: 'Q76',
       type: 'item',
+      kind: 'full' as const,
       aliases,
       fieldsReturned: ['aliases'],
     });
@@ -357,6 +361,7 @@ describe('wikidataGetEntity', () => {
     const blocks = wikidataGetEntity.format!({
       id: 'Q76',
       type: 'item',
+      kind: 'full' as const,
       aliases: { en: ['Obama'] },
       fieldsReturned: ['aliases'],
     });
@@ -364,6 +369,399 @@ describe('wikidataGetEntity', () => {
 
     expect(text).toContain('Obama');
     expect(text).not.toContain('languages total');
+  });
+
+  /**
+   * #26: `fields` narrows the upstream fetch via `?_fields=`, not just the response. The
+   * service owns which values each endpoint accepts; the tool's job is to pass the caller's
+   * selection down rather than fetch everything and filter.
+   */
+  describe('field selection reaches the fetch', () => {
+    it('passes the requested fields to the service', async () => {
+      mockFetchEntity.mockResolvedValue(mockEntity);
+
+      const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+      const input = wikidataGetEntity.input.parse({ id: 'Q76', fields: ['labels'] });
+      await wikidataGetEntity.handler(input, ctx);
+
+      expect(mockFetchEntity).toHaveBeenCalledWith('Q76', expect.anything(), ['labels']);
+    });
+
+    it('passes no field list when the caller wants everything', async () => {
+      mockFetchEntity.mockResolvedValue(mockEntity);
+
+      const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+      const input = wikidataGetEntity.input.parse({ id: 'Q76' });
+      await wikidataGetEntity.handler(input, ctx);
+
+      expect(mockFetchEntity).toHaveBeenCalledWith('Q76', expect.anything(), undefined);
+    });
+
+    it("passes the normalized ID, not the caller's casing", async () => {
+      mockFetchEntity.mockResolvedValue(mockEntity);
+
+      const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+      const input = wikidataGetEntity.input.parse({ id: ' q76 ', fields: ['labels'] });
+      await wikidataGetEntity.handler(input, ctx);
+
+      expect(mockFetchEntity).toHaveBeenCalledWith('Q76', expect.anything(), ['labels']);
+    });
+  });
+
+  /**
+   * #17: `get_entity` on a well-connected item returned a 793,897-character payload — past
+   * the calling client's token ceiling. Over budget it now outlines the field categories,
+   * which is exactly the vocabulary the `fields` input already takes.
+   */
+  describe('overflow to outline', () => {
+    /** An entity whose categories together exceed the 24,000-byte budget. */
+    const bulkyEntity = {
+      id: 'Q30',
+      type: 'item' as const,
+      labels: { en: 'x'.repeat(9_000) },
+      descriptions: { en: 'y'.repeat(9_000) },
+      aliases: { en: ['z'.repeat(9_000)] },
+    };
+
+    /** A statements category that alone exceeds the budget — the live Q30 case, ~793KB. */
+    const oversizedStatements = {
+      id: 'Q30',
+      type: 'item' as const,
+      statements: {
+        P31: [
+          {
+            id: 's',
+            rank: 'normal',
+            property: { id: 'P31' },
+            value: { type: 'string', content: 'q'.repeat(40_000) },
+          },
+        ],
+      },
+    };
+
+    it('returns the data inline when the entity fits the budget', async () => {
+      mockFetchEntity.mockResolvedValue(mockEntity);
+
+      const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+      const input = wikidataGetEntity.input.parse({ id: 'Q76' });
+      const result = await wikidataGetEntity.handler(input, ctx);
+
+      expect(result.kind).toBe('full');
+      expect(result.labels).toBeDefined();
+      expect(result.sections).toBeUndefined();
+      expect(result.retrieval_notice).toBeUndefined();
+    });
+
+    it('returns an outline instead of the data for an oversized entity', async () => {
+      mockFetchEntity.mockResolvedValue(bulkyEntity);
+
+      const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+      const input = wikidataGetEntity.input.parse({ id: 'Q30' });
+      const result = await wikidataGetEntity.handler(input, ctx);
+
+      expect(result.kind).toBe('outline');
+      expect(result.labels).toBeUndefined();
+      expect(result.descriptions).toBeUndefined();
+      expect(result.aliases).toBeUndefined();
+      expect(JSON.stringify(result).length).toBeLessThan(24_000);
+    });
+
+    it('outlines only field categories — never id, type, or fieldsReturned', async () => {
+      mockFetchEntity.mockResolvedValue(bulkyEntity);
+
+      const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+      const input = wikidataGetEntity.input.parse({ id: 'Q30' });
+      const result = await wikidataGetEntity.handler(input, ctx);
+
+      // Every section name must be something `fields` will accept on the re-call.
+      const names = (result.sections ?? []).map((s) => s.name).sort();
+      expect(names).toEqual(['aliases', 'descriptions', 'labels']);
+      const enumValues = ['labels', 'descriptions', 'aliases', 'statements', 'sitelinks'];
+      for (const name of names) expect(enumValues).toContain(name);
+    });
+
+    it('keeps the entity identity alongside the outline', async () => {
+      mockFetchEntity.mockResolvedValue(bulkyEntity);
+
+      const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+      const input = wikidataGetEntity.input.parse({ id: 'Q30' });
+      const result = await wikidataGetEntity.handler(input, ctx);
+
+      // An outline that did not say which entity it described would be unusable.
+      expect(result.id).toBe('Q30');
+      expect(result.type).toBe('item');
+      expect(result.fieldsReturned).toContain('labels');
+    });
+
+    it('points the re-call at the fields parameter, not a sections parameter', async () => {
+      mockFetchEntity.mockResolvedValue(bulkyEntity);
+
+      const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+      const input = wikidataGetEntity.input.parse({ id: 'Q30' });
+      const result = await wikidataGetEntity.handler(input, ctx);
+
+      // The tool has no `sections` input — the outline must name the lever it does have.
+      expect(result.retrieval_notice).toContain('fields:[');
+      expect(result.retrieval_notice).not.toContain('sections:[...]');
+      // Every section here fits, so nothing needs redirecting elsewhere.
+      expect(result.retrieval_notice).not.toContain('wikidata_get_statements');
+    });
+
+    /**
+     * The termination guarantee: following the notice must make progress. The regression is a
+     * closed loop — a notice enumerating every individually-fitting category as one re-call,
+     * when their combined size overflows, so the caller re-issues that call and gets the same
+     * outline forever. These read the notice the way a caller would and follow it literally,
+     * rather than asserting against an assumption about what it says.
+     */
+    describe('following the notice terminates', () => {
+      /** The literal fields array the notice tells the caller to send next. */
+      const askedFields = (notice: string): string[] => {
+        const match = /fields:(\[[^\]]*\])/.exec(notice);
+        return match?.[1] ? (JSON.parse(match[1]) as string[]) : [];
+      };
+
+      /** Each category fits alone; 12,400 + 10,400 + 6,800 together does not. */
+      const additivelyOversized = {
+        id: 'Q30',
+        type: 'item' as const,
+        aliases: { en: ['a'.repeat(12_400)] },
+        labels: { en: 'l'.repeat(10_400) },
+        descriptions: { en: 'd'.repeat(6_800) },
+      };
+
+      it('names a set that fits combined, not every category that fits alone', async () => {
+        mockFetchEntity.mockResolvedValue(additivelyOversized);
+
+        const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+        const result = await wikidataGetEntity.handler(
+          wikidataGetEntity.input.parse({ id: 'Q30' }),
+          ctx,
+        );
+
+        const asked = askedFields(result.retrieval_notice ?? '');
+        expect(asked.length).toBeGreaterThan(0);
+        expect(asked.length).toBeLessThan(3);
+        expect(result.retrieval_notice).toContain('in a further call');
+      });
+
+      it('re-calling with the fields the notice names returns data, not the same outline', async () => {
+        mockFetchEntity.mockResolvedValue(additivelyOversized);
+
+        const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+        const first = await wikidataGetEntity.handler(
+          wikidataGetEntity.input.parse({ id: 'Q30' }),
+          ctx,
+        );
+        expect(first.kind).toBe('outline');
+
+        // Do exactly what the notice says, with no interpretation.
+        const second = await wikidataGetEntity.handler(
+          wikidataGetEntity.input.parse({
+            id: 'Q30',
+            fields: askedFields(first.retrieval_notice ?? ''),
+          }),
+          ctx,
+        );
+
+        expect(second.kind).toBe('full');
+        expect(second.retrieval_notice).toBeUndefined();
+        expect(JSON.stringify(second).length).toBeLessThanOrEqual(24_000);
+      });
+
+      it('leaves the deferred categories reachable in a further call', async () => {
+        mockFetchEntity.mockResolvedValue(additivelyOversized);
+
+        const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+        const first = await wikidataGetEntity.handler(
+          wikidataGetEntity.input.parse({ id: 'Q30' }),
+          ctx,
+        );
+        const asked = askedFields(first.retrieval_notice ?? '');
+        const deferred = ['aliases', 'labels', 'descriptions'].filter((f) => !asked.includes(f));
+
+        const rest = await wikidataGetEntity.handler(
+          wikidataGetEntity.input.parse({ id: 'Q30', fields: deferred }),
+          ctx,
+        );
+
+        // Two calls retrieve everything — nothing is stranded by the split.
+        expect(deferred.length).toBeGreaterThan(0);
+        expect(rest.kind).toBe('full');
+      });
+
+      it('never names an oversized category in the fields set', async () => {
+        mockFetchEntity.mockResolvedValue({
+          id: 'Q30',
+          type: 'item',
+          labels: { en: 'l'.repeat(9_000) },
+          descriptions: { en: 'd'.repeat(9_000) },
+          statements: oversizedStatements.statements,
+        });
+
+        const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+        const result = await wikidataGetEntity.handler(
+          wikidataGetEntity.input.parse({ id: 'Q30' }),
+          ctx,
+        );
+
+        const asked = askedFields(result.retrieval_notice ?? '');
+        expect(asked).not.toContain('statements');
+        expect(asked).toContain('labels');
+      });
+
+      it('offers no fields set at all when nothing can be delivered through it', async () => {
+        mockFetchEntity.mockResolvedValue(oversizedStatements);
+
+        const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+        const result = await wikidataGetEntity.handler(
+          wikidataGetEntity.input.parse({ id: 'Q30', fields: ['statements'] }),
+          ctx,
+        );
+
+        // No fields advice to follow — the redirect is the progress.
+        expect(askedFields(result.retrieval_notice ?? '')).toEqual([]);
+        expect(result.retrieval_notice).toContain('wikidata_get_statements');
+      });
+    });
+
+    /**
+     * The regression this guards: the outline must never point a caller at a category it has
+     * already measured as over budget. `fields` would return the same overflow, so following
+     * our own notice would land on the failure the outline exists to prevent. Each oversized
+     * category is redirected to a lever with finer granularity than `fields` carries.
+     */
+    describe('oversized categories are redirected, never advertised via fields', () => {
+      it('outlines a lone oversized category rather than returning it whole', async () => {
+        mockFetchEntity.mockResolvedValue(oversizedStatements);
+
+        const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+        const input = wikidataGetEntity.input.parse({ id: 'Q30', fields: ['statements'] });
+        const result = await wikidataGetEntity.handler(input, ctx);
+
+        // One section, over budget: the primitive short-circuits to `full` here and hands
+        // back the payload. The redirect is what makes the round-trip worth taking.
+        expect(result.kind).toBe('outline');
+        expect(result.statements).toBeUndefined();
+        expect(result.sections).toHaveLength(1);
+        expect(JSON.stringify(result).length).toBeLessThan(24_000);
+      });
+
+      it('routes a lone oversized statements category to wikidata_get_statements', async () => {
+        mockFetchEntity.mockResolvedValue(oversizedStatements);
+
+        const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+        const input = wikidataGetEntity.input.parse({ id: 'Q30', fields: ['statements'] });
+        const result = await wikidataGetEntity.handler(input, ctx);
+
+        expect(result.retrieval_notice).toContain('wikidata_get_statements');
+        expect(result.retrieval_notice).toContain('properties:[...]');
+        // Nothing fits, so there is no fields offer at all to mislead the caller.
+        expect(result.retrieval_notice).not.toContain('fields:[');
+      });
+
+      it('routes an oversized sitelinks category to wikidata_get_sitelinks', async () => {
+        mockFetchEntity.mockResolvedValue({
+          id: 'Q30',
+          type: 'item',
+          sitelinks: Object.fromEntries(
+            Array.from({ length: 400 }, (_, i) => [`site${i}wiki`, { title: 'x'.repeat(80) }]),
+          ),
+        });
+
+        const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+        const input = wikidataGetEntity.input.parse({ id: 'Q30', fields: ['sitelinks'] });
+        const result = await wikidataGetEntity.handler(input, ctx);
+
+        expect(result.kind).toBe('outline');
+        expect(result.retrieval_notice).toContain('wikidata_get_sitelinks');
+        expect(result.retrieval_notice).toContain('sites:[...]');
+      });
+
+      it('routes an oversized language-keyed category to the languages parameter', async () => {
+        mockFetchEntity.mockResolvedValue({
+          id: 'Q30',
+          type: 'item',
+          labels: Object.fromEntries(
+            Array.from({ length: 400 }, (_, i) => [`lang${i}`, 'x'.repeat(80)]),
+          ),
+        });
+
+        const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+        const input = wikidataGetEntity.input.parse({ id: 'Q30', fields: ['labels'] });
+        const result = await wikidataGetEntity.handler(input, ctx);
+
+        expect(result.kind).toBe('outline');
+        expect(result.retrieval_notice).toContain('languages');
+      });
+
+      /**
+       * The composed failure that started this: a multi-section outline advertising
+       * `statements` — a section it had just measured at 793,825 bytes — as fields-retrievable.
+       */
+      it('splits a mixed outline into fields for what fits and a redirect for what does not', async () => {
+        mockFetchEntity.mockResolvedValue({
+          id: 'Q30',
+          type: 'item',
+          labels: { en: 'x'.repeat(9_000) },
+          descriptions: { en: 'y'.repeat(9_000) },
+          statements: oversizedStatements.statements,
+        });
+
+        const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+        const input = wikidataGetEntity.input.parse({ id: 'Q30' });
+        const result = await wikidataGetEntity.handler(input, ctx);
+
+        expect(result.kind).toBe('outline');
+        const notice = result.retrieval_notice ?? '';
+
+        // The fields set covers the two that fit and excludes the one that does not.
+        const offer = /fields:(\[[^\]]*\])/.exec(notice)?.[1] ?? '';
+        expect(offer).toContain('labels');
+        expect(offer).toContain('descriptions');
+        expect(offer).not.toContain('statements');
+
+        // ...and statements carries its own redirect instead.
+        expect(notice).toContain('wikidata_get_statements');
+        expect(notice).toContain('properties:[...]');
+      });
+
+      it('offers fields for every section when none is individually oversized', async () => {
+        mockFetchEntity.mockResolvedValue(bulkyEntity);
+
+        const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+        const input = wikidataGetEntity.input.parse({ id: 'Q30' });
+        const result = await wikidataGetEntity.handler(input, ctx);
+
+        const notice = result.retrieval_notice ?? '';
+        expect(notice).toContain('fields:[');
+        expect(notice).not.toContain('cannot deliver');
+        // Each is reachable — named in the fields set, or deferred to a further call.
+        for (const name of ['labels', 'descriptions', 'aliases']) expect(notice).toContain(name);
+      });
+    });
+
+    it('format: renders the outline sections and the re-call notice', () => {
+      const blocks = wikidataGetEntity.format!({
+        id: 'Q30',
+        type: 'item',
+        kind: 'outline',
+        fieldsReturned: ['labels', 'statements'],
+        sections: [
+          { name: 'statements', bytes: 793_825 },
+          { name: 'sitelinks', bytes: 59_631 },
+        ],
+        retrieval_notice:
+          'Entity too large to inline. Re-call wikidata_get_entity with the same id plus fields:["labels"].',
+      });
+      const text = blocks.map((b) => (b as { text: string }).text).join('\n');
+
+      expect(text).toContain('Q30');
+      expect(text).toContain('statements');
+      expect(text).toContain('793825');
+      expect(text).toContain('fields:["labels"]');
+      expect(text).toContain('2 sections available');
+    });
   });
 
   it('security: injection attempt in ID is rejected as invalid', async () => {

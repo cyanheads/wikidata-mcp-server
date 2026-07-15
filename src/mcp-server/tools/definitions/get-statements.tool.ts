@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { formatOutline, OUTLINE_VARIANT, outlineOnOverflow } from '@cyanheads/mcp-ts-core/utils';
 import type { NormalizedStatement } from '@/services/wikidata/types.js';
 import {
   getWikidataRestService,
@@ -20,8 +21,11 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
   description:
     'Fetch property claims for a Wikidata entity with qualifier and reference detail. ' +
     'Value QIDs are resolved to human-readable labels by default. ' +
-    'Use the properties parameter to fetch only specific P-IDs — omitting it returns all statements, ' +
-    'which can be large. Designed for fact verification: "what does Wikidata say about this entity\'s {property}?". ' +
+    'Use the properties parameter to fetch only specific P-IDs — omitting it returns every statement, ' +
+    'and a well-connected item (a country, a major city) carries hundreds of properties: more than fits inline. ' +
+    'An oversized set comes back as kind: "outline" — every available P-ID with its byte size, largest first — ' +
+    'instead of the statements; re-call with the same id plus properties:[...] naming the P-IDs you want. ' +
+    'Designed for fact verification: "what does Wikidata say about this entity\'s {property}?". ' +
     'Preferred-rank statements are the most current values.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
@@ -51,17 +55,51 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
 
   output: z.object({
     id: z.string().describe('The entity ID whose statements were fetched.'),
+    kind: z
+      .enum(['full', 'outline'])
+      .describe(
+        'full — statements carries the claims. outline — the statement set overflowed the inline byte budget, ' +
+          'so sections lists the P-IDs available instead; re-call with properties:[...] to retrieve specific ones. ' +
+          'The counts below are reported either way.',
+      ),
     // Statement values are from a dynamic external API (12+ data types, each with a different shape).
     // Passthrough preserves all normalized fields in structuredContent without over-typing each branch.
     statements: z
       .record(z.string(), z.array(z.object({}).passthrough()))
+      .optional()
       .describe(
         'Map of property ID to array of normalized statements. ' +
           'Each statement has id, rank, property, value (with type-specific fields), ' +
-          'and optional qualifiers and references arrays.',
+          'and optional qualifiers and references arrays. Present in full mode; omitted in outline mode.',
       ),
-    propertyCount: z.number().describe('Number of distinct properties returned.'),
-    statementCount: z.number().describe('Total number of statement objects across all properties.'),
+    sections: z
+      .array(
+        OUTLINE_VARIANT.shape.sections.element.describe(
+          'An available property — its P-ID and the serialized byte size of its statements.',
+        ),
+      )
+      .optional()
+      .describe(
+        'Present when kind = outline: the P-IDs this entity carries statements for, largest first. ' +
+          'Copy names into the properties input to retrieve them.',
+      ),
+    // Named retrieval_notice, not notice: it is part of the outline payload the agent acts
+    // on, not additive agent-facing context. Enrichment is merged *after* output.parse and
+    // so can only add to a fat result, never replace it with an outline.
+    retrieval_notice: OUTLINE_VARIANT.shape.notice
+      .optional()
+      .describe('Present when kind = outline: how to re-call for specific properties.'),
+    propertyCount: z
+      .number()
+      .describe(
+        'Number of distinct properties — those returned in full mode, those offered as sections in outline mode.',
+      ),
+    statementCount: z
+      .number()
+      .describe(
+        'Total number of statement objects across all properties. Counted before any overflow, ' +
+          "so it reports the entity's full statement volume in both modes.",
+      ),
     labelsResolved: z
       .boolean()
       .describe(
@@ -183,22 +221,62 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
 
     const statementCount = Object.values(normalized).reduce((acc, stmts) => acc + stmts.length, 0);
 
-    return {
+    /** Cheap metadata — kept in both arms; the overflow primitive returns only kind/sections/notice. */
+    const base = {
       id,
-      statements: normalized,
       propertyCount: Object.keys(normalized).length,
       statementCount,
       labelsResolved: input.resolve_labels,
-    } as never;
+    };
+
+    /**
+     * Sections are the statement map's top-level keys — P-IDs — which is already the
+     * vocabulary the `properties` input speaks, so the outline points at an existing lever
+     * and the default extractor is the right one. Measured after normalization and label
+     * resolution because that is the payload the caller actually receives.
+     *
+     * An entity whose statements sit under a single P-ID is returned whole even when
+     * oversized: the primitive short-circuits below two sections, since the only re-call an
+     * outline could offer would return the same bytes.
+     */
+    const overflow = outlineOnOverflow(normalized, {
+      notice: (sections) =>
+        `Statement set too large to inline. Re-call wikidata_get_statements with the same id plus ` +
+        `properties:[...] naming the P-IDs you need — e.g. ${sections
+          .slice(0, 3)
+          .map((s) => s.name)
+          .join(', ')}.`,
+    });
+
+    if (overflow.kind === 'outline') {
+      ctx.log.info('Statement set overflowed — returning outline', {
+        id,
+        propertyCount: base.propertyCount,
+        sections: overflow.sections.length,
+      });
+      return {
+        ...base,
+        kind: 'outline',
+        sections: overflow.sections,
+        retrieval_notice: overflow.notice,
+      } as never;
+    }
+
+    return { ...base, kind: 'full', statements: normalized } as never;
   },
 
+  /**
+   * Each arm renders on the presence of its own fields, never by branching on `kind` —
+   * format-parity injects one synthetic sample with every optional field populated at once,
+   * so a mutually-exclusive branch would leave the untaken arm's fields unrendered.
+   */
   format: (result) => {
     const lines: string[] = [
       `## Statements for ${result.id}`,
-      `**Properties:** ${result.propertyCount} | **Total statements:** ${result.statementCount} | **Labels resolved:** ${result.labelsResolved}`,
+      `**Properties:** ${result.propertyCount} | **Total statements:** ${result.statementCount} | **Labels resolved:** ${result.labelsResolved} | **Response:** ${result.kind}`,
     ];
 
-    for (const [propId, rawStmts] of Object.entries(result.statements)) {
+    for (const [propId, rawStmts] of Object.entries(result.statements ?? {})) {
       lines.push('');
       lines.push(`### ${propId}`);
       for (const rawStmt of rawStmts) {
@@ -217,7 +295,15 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
       }
     }
 
-    return [{ type: 'text', text: lines.join('\n') }];
+    const outlineBlocks = result.sections
+      ? formatOutline({
+          kind: 'outline',
+          sections: result.sections,
+          notice: result.retrieval_notice ?? '',
+        })
+      : [];
+
+    return [{ type: 'text', text: lines.join('\n') }, ...outlineBlocks];
   },
 });
 
