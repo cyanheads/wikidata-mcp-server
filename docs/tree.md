@@ -1,6 +1,6 @@
 # wikidata-mcp-server - Directory Structure
 
-Generated on: 2026-07-14 22:34:15
+Generated on: 2026-07-15 00:42:09
 
 ```text
 wikidata-mcp-server/
@@ -157,7 +157,8 @@ wikidata-mcp-server/
 │   ├── resources/
 │   │   └── entity.resource.test.ts
 │   ├── services/
-│   │   └── wikidata-rest-service.test.ts
+│   │   ├── wikidata-rest-service.test.ts
+│   │   └── wikidata-sparql-service.test.ts
 │   └── tools/
 │       ├── get-entity.tool.test.ts
 │       ├── get-labels.tool.test.ts
