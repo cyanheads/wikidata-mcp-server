@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.18](changelog/0.1.x/0.1.18.md) — 2026-08-22
+
+MCP 2026-07-28 and SDK v2 adoption, explicit stateless HTTP sessions, and content parity for multilingual labels and statement references
+
 ## [0.1.17](changelog/0.1.x/0.1.17.md) — 2026-07-14
 
 wikidata_get_entity/wikidata_get_statements return an outline instead of an oversized payload; SPARQL label injection fixed for a trailing VALUES clause; wikidata_get_entity narrows its REST fetch via _fields

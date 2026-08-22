@@ -1,6 +1,6 @@
 {
   "name": "wikidata-mcp-server",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "Search and fetch Wikidata entities, execute SPARQL queries, and resolve external identifiers via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads"

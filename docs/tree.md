@@ -1,10 +1,9 @@
 # wikidata-mcp-server - Directory Structure
 
-Generated on: 2026-07-15 00:42:09
+Generated on: 2026-08-22 20:58:42
 
 ```text
 wikidata-mcp-server/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
@@ -15,6 +14,8 @@ wikidata-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/
