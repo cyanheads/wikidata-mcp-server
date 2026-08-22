@@ -243,5 +243,33 @@ describe('WikidataSparqlService', () => {
         makeService().query('SELECT ?x WHERE { ?x ?y ?z }', 'en', 5_000, createMockContext()),
       ).rejects.toThrow(/HTML/);
     });
+
+    it('preserves caller cancellation instead of misclassifying it as a timeout', async () => {
+      mockFetch.mockImplementation(
+        (_url: string, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              'abort',
+              () =>
+                setTimeout(
+                  () => reject(new DOMException('Request cancelled by caller.', 'AbortError')),
+                  20,
+                ),
+              { once: true },
+            );
+          }),
+      );
+
+      const caller = new AbortController();
+      const pending = makeService().query(
+        'SELECT ?x WHERE { ?x ?y ?z }',
+        'en',
+        10,
+        createMockContext({ signal: caller.signal }),
+      );
+      caller.abort();
+
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    });
   });
 });

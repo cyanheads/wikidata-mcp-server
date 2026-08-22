@@ -7,7 +7,7 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { fetchWithTimeout, type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type {
   NormalizedStatement,
@@ -82,15 +82,15 @@ export function normalizeId(id: string): string {
  * syntactically valid but out-of-range ID (Q999999999999) with 400 `invalid-path-parameter`
  * — on the items, statements, and sitelinks endpoints alike. Both mean the same thing to a
  * caller, so both map to `entity_not_found`. `fetchWithTimeout` rejects every non-2xx with an
- * `McpError` carrying the HTTP status on `data.statusCode`.
+ * `McpError` carrying the HTTP status on `data.status`.
  *
  * Call this only from entity-addressed lookups (fetchEntity/fetchStatements/fetchSitelinks).
  * `search()` shares the same transport, but a 400 there means a malformed query, not a
  * missing entity — classifying it as not-found would report a broken search as an empty one.
  */
 export function isEntityNotFoundError(err: unknown): boolean {
-  const statusCode = (err as { data?: { statusCode?: number } } | null)?.data?.statusCode;
-  return statusCode === 404 || statusCode === 400;
+  const status = (err as { data?: { status?: number } } | null)?.data?.status;
+  return status === 404 || status === 400;
 }
 
 /**
@@ -130,13 +130,12 @@ export class WikidataRestService {
 
   /**
    * GETs JSON from the REST API. `fetchWithTimeout` rejects every non-2xx itself — with the
-   * status on `data.statusCode` — so a returned response is always 2xx and needs no status check.
+   * status on `data.status` — so a returned response is always 2xx and needs no status check.
    */
   private getJson<T>(url: string, ctx: Context): Promise<T> {
-    const rctx = ctx as unknown as RequestContext;
     return withRetry(
       async () => {
-        const response = await fetchWithTimeout(url, this.restTimeoutMs, rctx, {
+        const response = await fetchWithTimeout(url, this.restTimeoutMs, ctx, {
           headers: this.headers,
           signal: ctx.signal,
         });
@@ -148,7 +147,7 @@ export class WikidataRestService {
         }
         return JSON.parse(text) as T;
       },
-      { operation: 'WikidataRest.getJson', context: rctx, baseDelayMs: 1000, signal: ctx.signal },
+      { operation: 'WikidataRest.getJson', context: ctx, baseDelayMs: 1000, signal: ctx.signal },
     );
   }
 
@@ -302,11 +301,9 @@ export class WikidataRestService {
       formatversion: '2',
     });
     const url = `${MW_API_BASE}?${params}`;
-    const rctx = ctx as unknown as RequestContext;
-
     return withRetry(
       async () => {
-        const response = await fetchWithTimeout(url, this.restTimeoutMs, rctx, {
+        const response = await fetchWithTimeout(url, this.restTimeoutMs, ctx, {
           headers: this.headers,
           signal: ctx.signal,
         });
@@ -318,7 +315,7 @@ export class WikidataRestService {
       },
       {
         operation: 'WikidataRest.fetchLabels',
-        context: rctx,
+        context: ctx,
         baseDelayMs: 1000,
         signal: ctx.signal,
       },

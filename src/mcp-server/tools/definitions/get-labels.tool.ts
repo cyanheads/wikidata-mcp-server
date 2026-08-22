@@ -105,17 +105,26 @@ export const wikidataGetLabels = tool('wikidata_get_labels', {
 
     lines.push('');
     for (const [id, data] of Object.entries(result.entities)) {
-      const enLabel = data.labels.en ?? Object.values(data.labels)[0] ?? id;
-      const enDesc = data.descriptions.en ?? Object.values(data.descriptions)[0] ?? '';
-      lines.push(`**${id}:** ${enLabel}${enDesc ? ` — ${enDesc}` : ''}`);
+      const availableLanguages = [
+        ...new Set([...Object.keys(data.labels), ...Object.keys(data.descriptions)]),
+      ];
+      const primaryLanguage = availableLanguages.includes('en') ? 'en' : availableLanguages[0];
+      const primaryLabel = primaryLanguage ? data.labels[primaryLanguage] : undefined;
+      const primaryDescription = primaryLanguage ? data.descriptions[primaryLanguage] : undefined;
+      lines.push(
+        `**${id}:** ${primaryLabel ?? id}${primaryDescription ? ` — ${primaryDescription}` : ''}`,
+      );
       // Show a bounded sample of the other requested languages, disclosing the full count
       // when the sample is cut — structuredContent always carries every language returned.
-      const otherEntries = Object.entries(data.labels).filter(([lang]) => lang !== 'en');
-      const otherLangs = otherEntries.slice(0, 3).map(([lang, lbl]) => `${lang}: ${lbl}`);
+      const otherLanguages = availableLanguages.filter((lang) => lang !== primaryLanguage);
+      const otherLangs = otherLanguages.slice(0, 3).map((lang) => {
+        const label = data.labels[lang] ?? id;
+        const description = data.descriptions[lang];
+        return `${lang}: ${label}${description ? ` — ${description}` : ''}`;
+      });
       if (otherLangs.length) {
-        const total = Object.keys(data.labels).length;
         lines.push(
-          `  ${otherLangs.join(' | ')}${otherEntries.length > 3 ? ` … (${total} total)` : ''}`,
+          `  ${otherLangs.join(' | ')}${otherLanguages.length > 3 ? ` … (${availableLanguages.length} total)` : ''}`,
         );
       }
     }

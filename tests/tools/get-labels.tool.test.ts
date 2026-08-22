@@ -119,6 +119,34 @@ describe('wikidataGetLabels', () => {
     expect(text).toContain('en');
   });
 
+  it('format: preserves descriptions for each sampled language', () => {
+    const blocks = wikidataGetLabels.format!({
+      entities: {
+        Q76: {
+          labels: { en: 'Barack Obama', de: 'Barack Obama' },
+          descriptions: {
+            en: '44th president of the United States',
+            de: '44. Präsident der Vereinigten Staaten',
+          },
+        },
+        P31: {
+          labels: { en: 'instance of', de: 'ist ein(e)' },
+          descriptions: {
+            en: 'class of which this subject is an example',
+            de: 'Klasse, zu der dieses Objekt gehört',
+          },
+        },
+      },
+      found: 2,
+      notFound: [],
+      languages: ['en', 'de'],
+    });
+    const text = (blocks[0] as { text: string }).text;
+
+    expect(text).toContain('de: Barack Obama — 44. Präsident der Vereinigten Staaten');
+    expect(text).toContain('de: ist ein(e) — Klasse, zu der dieses Objekt gehört');
+  });
+
   /**
    * The rendered text samples 3 non-English languages; structuredContent carries every
    * language returned. Without a count, a content[]-only client cannot tell a complete

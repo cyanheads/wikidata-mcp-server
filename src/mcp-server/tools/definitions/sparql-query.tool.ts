@@ -90,7 +90,7 @@ export const wikidataSparqlQuery = tool('wikidata_sparql_query', {
     },
     {
       reason: 'timeout',
-      code: JsonRpcErrorCode.ServiceUnavailable,
+      code: JsonRpcErrorCode.Timeout,
       when: 'Query exceeded the client-side timeout.',
       retryable: true,
       recovery:

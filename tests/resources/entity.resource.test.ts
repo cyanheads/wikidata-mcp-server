@@ -20,12 +20,12 @@ vi.mock('@/services/wikidata/wikidata-rest-service.js', async (importOriginal) =
   getWikidataRestService: () => ({ fetchEntity: mockFetchEntity }),
 }));
 
-/** Mirrors what fetchWithTimeout rejects with on a non-2xx: an McpError carrying data.statusCode. */
-const httpError = (statusCode: number) =>
+/** Mirrors what fetchWithTimeout rejects with on a non-2xx: an McpError carrying data.status. */
+const httpError = (status: number) =>
   new McpError(
-    statusCode === 404 ? JsonRpcErrorCode.NotFound : JsonRpcErrorCode.InvalidParams,
-    `Fetch failed for https://www.wikidata.org/w/rest.php/wikibase/v1/entities/items/Q76. Status: ${statusCode}`,
-    { statusCode, responseBody: '{"code":"invalid-path-parameter"}' },
+    status === 404 ? JsonRpcErrorCode.NotFound : JsonRpcErrorCode.InvalidParams,
+    `Fetch failed for https://www.wikidata.org/w/rest.php/wikibase/v1/entities/items/Q76. Status: ${status}`,
+    { status, responseBody: '{"code":"invalid-path-parameter"}' },
   );
 
 const mockItemEntity = {
@@ -174,13 +174,15 @@ describe('wikidataEntityResource', () => {
     mockFetchEntity.mockRejectedValue(httpError(400));
 
     const ctx = createMockContext({ uri: new URL('wikidata://entity/Q999999999999') });
-    const err = await wikidataEntityResource
-      .handler({ id: 'Q999999999999' }, ctx)
-      .catch((e: Error) => e);
+    const err = await Promise.resolve(
+      wikidataEntityResource.handler({ id: 'Q999999999999' }, ctx),
+    ).catch((error: unknown) => error);
 
-    expect(err.message).toBe('No Wikidata entity found for ID "Q999999999999".');
-    expect(err.message).not.toContain('rest.php');
-    expect(err.message).not.toContain('invalid-path-parameter');
+    expect(err).toBeInstanceOf(Error);
+    const message = (err as Error).message;
+    expect(message).toBe('No Wikidata entity found for ID "Q999999999999".');
+    expect(message).not.toContain('rest.php');
+    expect(message).not.toContain('invalid-path-parameter');
   });
 
   it('re-throws service errors that are not a not-found', async () => {
@@ -318,8 +320,9 @@ describe('wikidataEntityResource', () => {
     expect(result).toContain('# Douglas Adams (Q42)');
   });
 
-  it('list() returns static example resources', () => {
-    const listed = wikidataEntityResource.list!();
+  it('list() returns static example resources', async () => {
+    const list = wikidataEntityResource.list!;
+    const listed = await list({} as Parameters<typeof list>[0]);
     expect(listed.resources).toHaveLength(3);
     const uris = listed.resources.map((r) => r.uri);
     expect(uris).toContain('wikidata://entity/Q76');

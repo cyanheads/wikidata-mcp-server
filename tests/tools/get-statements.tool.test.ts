@@ -27,12 +27,12 @@ vi.mock('@/services/wikidata/wikidata-rest-service.js', async (importOriginal) =
     mockNormalizeStatements(...args),
 }));
 
-/** Mirrors what fetchWithTimeout rejects with on a non-2xx: an McpError carrying data.statusCode. */
-const httpError = (statusCode: number) =>
+/** Mirrors what fetchWithTimeout rejects with on a non-2xx: an McpError carrying data.status. */
+const httpError = (status: number) =>
   new McpError(
-    statusCode === 404 ? JsonRpcErrorCode.NotFound : JsonRpcErrorCode.InvalidParams,
-    `Fetch failed. Status: ${statusCode}`,
-    { statusCode },
+    status === 404 ? JsonRpcErrorCode.NotFound : JsonRpcErrorCode.InvalidParams,
+    `Fetch failed. Status: ${status}`,
+    { status },
   );
 
 const rawStatements = {
@@ -199,7 +199,9 @@ describe('wikidataGetStatements', () => {
 
     const ctx = createMockContext({ errors: wikidataGetStatements.errors });
     const input = wikidataGetStatements.input.parse({ id: 'Q76', properties: ['NOTAPROP'] });
-    const err = await wikidataGetStatements.handler(input, ctx).catch((e: unknown) => e);
+    const err = await Promise.resolve(wikidataGetStatements.handler(input, ctx)).catch(
+      (error: unknown) => error,
+    );
 
     expect((err as McpError).data).toMatchObject({ reason: 'invalid_property' });
     expect((err as McpError).data).not.toMatchObject({ reason: 'entity_not_found' });
@@ -326,6 +328,46 @@ describe('wikidataGetStatements', () => {
     const blocks = wikidataGetStatements.format!(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('deprecated');
+  });
+
+  it('format: renders a bounded sample of statement references', () => {
+    const output = {
+      id: 'Q76',
+      kind: 'full' as const,
+      statements: {
+        P569: [
+          {
+            id: 'stmt2',
+            rank: 'normal',
+            property: 'P569',
+            value: { type: 'time' as const, time: '+1961-08-04T00:00:00Z', precision: 11 },
+            references: [
+              { property: 'P248', value: { type: 'wikibase-item' as const, qid: 'Q5375741' } },
+              {
+                property: 'P813',
+                value: { type: 'time' as const, time: '+2026-08-22T00:00:00Z', precision: 11 },
+              },
+              {
+                property: 'P854',
+                value: { type: 'url' as const, value: 'https://example.test/source' },
+              },
+              { property: 'P123', value: { type: 'string' as const, value: 'not rendered' } },
+            ],
+          },
+        ],
+      },
+      propertyCount: 1,
+      statementCount: 1,
+      labelsResolved: false,
+    };
+    const blocks = wikidataGetStatements.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+
+    expect(text).toContain('References (3 of 4)');
+    expect(text).toContain('P248: Q5375741');
+    expect(text).toContain('P813: +2026-08-22T00:00:00Z');
+    expect(text).toContain('P854: https://example.test/source');
+    expect(text).not.toContain('not rendered');
   });
 
   /**

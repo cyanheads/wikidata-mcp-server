@@ -5,8 +5,14 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
+import {
+  rateLimited,
+  serviceUnavailable,
+  timeout,
+  validationError,
+} from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type { SparqlResponse } from './types.js';
 
@@ -70,16 +76,16 @@ export class WikidataSparqlService {
     const query = this.prepareQuery(rawQuery, language);
 
     ctx.log.debug('Executing SPARQL query', { language, timeoutMs: effectiveTimeout });
-    const rctx = ctx as unknown as RequestContext;
-
     return withRetry(
       async () => {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), effectiveTimeout);
-
-        // Forward cancellation from the caller's signal to our timeout controller
-        const onCallerAbort = () => controller.abort();
-        ctx.signal.addEventListener('abort', onCallerAbort);
+        const timeoutController = new AbortController();
+        let timedOut = false;
+        const timeoutId = setTimeout(() => {
+          if (ctx.signal.aborted) return;
+          timedOut = true;
+          timeoutController.abort();
+        }, effectiveTimeout);
+        const signal = AbortSignal.any([ctx.signal, timeoutController.signal]);
 
         try {
           const response = await fetch(SPARQL_ENDPOINT, {
@@ -90,12 +96,11 @@ export class WikidataSparqlService {
               'Content-Type': 'application/x-www-form-urlencoded',
             },
             body: new URLSearchParams({ query }),
-            signal: controller.signal,
+            signal,
           });
 
           if (response.status === 429) {
             const retryAfter = response.headers.get('Retry-After');
-            const { rateLimited } = await import('@cyanheads/mcp-ts-core/errors');
             throw rateLimited(
               `Wikidata SPARQL endpoint is rate-limited. ${retryAfter ? `Retry after ${retryAfter}s.` : 'Retry shortly.'}`,
               { reason: 'throttled', ...(retryAfter ? { retryAfter } : {}) },
@@ -106,13 +111,11 @@ export class WikidataSparqlService {
             const body = await response.text().catch(() => '');
             if (response.status === 400 || response.status === 422) {
               const cause = extractSparqlError(body);
-              const { validationError } = await import('@cyanheads/mcp-ts-core/errors');
               throw validationError(`SPARQL parse error: ${cause}`, {
                 reason: 'parse_error',
                 cause,
               });
             }
-            const { serviceUnavailable } = await import('@cyanheads/mcp-ts-core/errors');
             throw serviceUnavailable(`Wikidata SPARQL endpoint returned HTTP ${response.status}.`, {
               status: response.status,
             });
@@ -120,7 +123,6 @@ export class WikidataSparqlService {
 
           const text = await response.text();
           if (isHtmlResponse(text)) {
-            const { serviceUnavailable } = await import('@cyanheads/mcp-ts-core/errors');
             throw serviceUnavailable(
               'SPARQL endpoint returned HTML — likely rate-limited or under maintenance.',
             );
@@ -128,9 +130,8 @@ export class WikidataSparqlService {
 
           return JSON.parse(text) as SparqlResponse;
         } catch (err) {
-          if (err instanceof Error && err.name === 'AbortError') {
-            const { serviceUnavailable } = await import('@cyanheads/mcp-ts-core/errors');
-            throw serviceUnavailable(
+          if (timedOut && err instanceof Error && err.name === 'AbortError') {
+            throw timeout(
               `SPARQL query timed out after ${effectiveTimeout / 1000}s. Add a LIMIT clause or simplify the query.`,
               { reason: 'timeout' },
             );
@@ -138,12 +139,11 @@ export class WikidataSparqlService {
           throw err;
         } finally {
           clearTimeout(timeoutId);
-          ctx.signal.removeEventListener('abort', onCallerAbort);
         }
       },
       {
         operation: 'WikidataSparql.query',
-        context: rctx,
+        context: ctx,
         baseDelayMs: 2000,
         signal: ctx.signal,
         // Only retry throttle errors (429), not parse errors or timeouts

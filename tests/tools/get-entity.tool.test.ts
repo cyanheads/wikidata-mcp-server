@@ -21,12 +21,12 @@ vi.mock('@/services/wikidata/wikidata-rest-service.js', async (importOriginal) =
   getWikidataRestService: () => ({ fetchEntity: mockFetchEntity }),
 }));
 
-/** Mirrors what fetchWithTimeout rejects with on a non-2xx: an McpError carrying data.statusCode. */
-const httpError = (statusCode: number) =>
+/** Mirrors what fetchWithTimeout rejects with on a non-2xx: an McpError carrying data.status. */
+const httpError = (status: number) =>
   new McpError(
-    statusCode === 404 ? JsonRpcErrorCode.NotFound : JsonRpcErrorCode.InvalidParams,
-    `Fetch failed for https://www.wikidata.org/w/rest.php/wikibase/v1/entities/items/Q76. Status: ${statusCode}`,
-    { statusCode, statusText: statusCode === 404 ? 'Not Found' : 'Bad Request' },
+    status === 404 ? JsonRpcErrorCode.NotFound : JsonRpcErrorCode.InvalidParams,
+    `Fetch failed for https://www.wikidata.org/w/rest.php/wikibase/v1/entities/items/Q76. Status: ${status}`,
+    { status, statusText: status === 404 ? 'Not Found' : 'Bad Request' },
   );
 
 const mockEntity = {
@@ -138,11 +138,15 @@ describe('wikidataGetEntity', () => {
 
     const ctx = createMockContext({ errors: wikidataGetEntity.errors });
     const input = wikidataGetEntity.input.parse({ id: 'Q999999999999' });
-    const err = await wikidataGetEntity.handler(input, ctx).catch((e: Error) => e);
+    const err = await Promise.resolve(wikidataGetEntity.handler(input, ctx)).catch(
+      (error: unknown) => error,
+    );
 
-    expect(err.message).toBe('No entity found for ID "Q999999999999".');
-    expect(err.message).not.toContain('rest.php');
-    expect(err.message).not.toContain('Status:');
+    expect(err).toBeInstanceOf(Error);
+    const message = (err as Error).message;
+    expect(message).toBe('No entity found for ID "Q999999999999".');
+    expect(message).not.toContain('rest.php');
+    expect(message).not.toContain('Status:');
   });
 
   it('re-throws service errors that are not a not-found', async () => {

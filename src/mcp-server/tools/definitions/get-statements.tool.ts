@@ -292,6 +292,16 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
             lines.push(`  - ${q.property}: ${formatStatementValue(q.value)}`);
           }
         }
+        if (stmt.references?.length) {
+          const shownReferences = stmt.references.slice(0, 3);
+          lines.push(
+            `  - **References (${shownReferences.length}${stmt.references.length > shownReferences.length ? ` of ${stmt.references.length}` : ''}):**`,
+          );
+          for (const reference of shownReferences) {
+            if (!reference?.value) continue;
+            lines.push(`    - ${reference.property}: ${formatStatementValue(reference.value)}`);
+          }
+        }
       }
     }
 
@@ -320,6 +330,8 @@ function formatStatementValue(value: NormalizedStatement['value']): string {
           ? `${value.amount} (${value.unit})`
           : value.amount;
     case 'string':
+    case 'external-id':
+    case 'url':
       return value.value;
     case 'monolingualtext':
       return `${value.text} [${value.language}]`;

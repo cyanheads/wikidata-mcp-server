@@ -215,10 +215,10 @@ describe('WikidataRestService', () => {
 
   describe('REST not-found classification', () => {
     /**
-     * fetchWithTimeout rejects every non-2xx itself, carrying the status on data.statusCode
+     * fetchWithTimeout rejects every non-2xx itself, carrying the status on data.status
      * — the field the tool catch sites key on. Guards the shape end to end.
      */
-    it('surfaces an out-of-range 400 as an McpError carrying data.statusCode', async () => {
+    it('surfaces an out-of-range 400 as an McpError carrying data.status', async () => {
       respondWithStatus(400, 'Bad Request', '{"code":"invalid-path-parameter"}');
 
       const svc = makeService();
@@ -226,17 +226,17 @@ describe('WikidataRestService', () => {
         .fetchEntity('Q999999999999', createMockContext())
         .catch((e: unknown) => e);
 
-      expect((err as { data?: { statusCode?: number } }).data?.statusCode).toBe(400);
+      expect((err as { data?: { status?: number } }).data?.status).toBe(400);
       expect(isEntityNotFoundError(err)).toBe(true);
     });
 
-    it('surfaces an unassigned 404 as an McpError carrying data.statusCode', async () => {
+    it('surfaces an unassigned 404 as an McpError carrying data.status', async () => {
       respondWithStatus(404, 'Not Found', '{"code":"resource-not-found"}');
 
       const svc = makeService();
       const err = await svc.fetchEntity('Q99999999', createMockContext()).catch((e: unknown) => e);
 
-      expect((err as { data?: { statusCode?: number } }).data?.statusCode).toBe(404);
+      expect((err as { data?: { status?: number } }).data?.status).toBe(404);
       expect(isEntityNotFoundError(err)).toBe(true);
     });
 
@@ -272,8 +272,8 @@ describe('WikidataRestService', () => {
       [429, false],
       [500, false],
       [503, false],
-    ])('statusCode %i → %s', (statusCode, expected) => {
-      expect(isEntityNotFoundError({ data: { statusCode } })).toBe(expected);
+    ])('status %i → %s', (status, expected) => {
+      expect(isEntityNotFoundError({ data: { status } })).toBe(expected);
     });
 
     it('is false for errors with no status data', () => {
@@ -283,11 +283,11 @@ describe('WikidataRestService', () => {
     });
 
     /**
-     * The pre-fix catch sites keyed on `data.status`, a field no live path populates.
-     * Matching it again would resurrect the bug.
+     * `data.statusCode` remains a compatibility alias, but new consumers use `data.status`.
+     * The predicate stays pinned to the canonical field.
      */
-    it('ignores the legacy data.status field', () => {
-      expect(isEntityNotFoundError({ data: { status: 404 } })).toBe(false);
+    it('ignores the legacy data.statusCode field', () => {
+      expect(isEntityNotFoundError({ data: { statusCode: 404 } })).toBe(false);
     });
   });
 

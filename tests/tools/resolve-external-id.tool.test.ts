@@ -24,8 +24,8 @@ vi.mock('@/services/wikidata/wikidata-rest-service.js', async (importOriginal) =
 }));
 
 /** A REST rejection shaped like the McpError fetchWithTimeout throws for a non-2xx. */
-const restError = (statusCode: number) =>
-  Object.assign(new Error(`HTTP ${statusCode}`), { data: { statusCode } });
+const restError = (status: number) =>
+  Object.assign(new Error(`HTTP ${status}`), { data: { status } });
 
 const successResponse = {
   head: { vars: ['item', 'itemLabel', 'itemDescription'] },

@@ -19,12 +19,12 @@ vi.mock('@/services/wikidata/wikidata-rest-service.js', async (importOriginal) =
   getWikidataRestService: () => ({ fetchSitelinks: mockFetchSitelinks }),
 }));
 
-/** Mirrors what fetchWithTimeout rejects with on a non-2xx: an McpError carrying data.statusCode. */
-const httpError = (statusCode: number) =>
+/** Mirrors what fetchWithTimeout rejects with on a non-2xx: an McpError carrying data.status. */
+const httpError = (status: number) =>
   new McpError(
-    statusCode === 404 ? JsonRpcErrorCode.NotFound : JsonRpcErrorCode.InvalidParams,
-    `Fetch failed. Status: ${statusCode}`,
-    { statusCode },
+    status === 404 ? JsonRpcErrorCode.NotFound : JsonRpcErrorCode.InvalidParams,
+    `Fetch failed. Status: ${status}`,
+    { status },
   );
 
 const mockSitelinks = {
@@ -109,10 +109,14 @@ describe('wikidataGetSitelinks', () => {
 
     const ctx = createMockContext({ errors: wikidataGetSitelinks.errors });
     const input = wikidataGetSitelinks.input.parse({ id: 'Q999999999999' });
-    const err = await wikidataGetSitelinks.handler(input, ctx).catch((e: Error) => e);
+    const err = await Promise.resolve(wikidataGetSitelinks.handler(input, ctx)).catch(
+      (error: unknown) => error,
+    );
 
-    expect(err.message).toBe('No item found for Q-ID "Q999999999999".');
-    expect(err.message).not.toContain('Status:');
+    expect(err).toBeInstanceOf(Error);
+    const message = (err as Error).message;
+    expect(message).toBe('No item found for Q-ID "Q999999999999".');
+    expect(message).not.toContain('Status:');
   });
 
   it('returns empty sitelinks with message when no matches', async () => {
