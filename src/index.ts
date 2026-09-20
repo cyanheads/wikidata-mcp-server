@@ -37,6 +37,9 @@ await createApp({
   ],
   resources: [wikidataEntityResource],
   prompts: [],
+  // No tool gates on ctx.requestInput, so every request is self-contained — declared
+  // here rather than left to MCP_SESSION_MODE, which still wins when a deployment sets it.
+  sessionMode: 'stateless',
   // Public hosted-catalog server — serve full inventory to unauthenticated callers
   // even when MCP_AUTH_MODE is jwt/oauth (0.9.13: default flipped to require auth).
   landing: { requireAuth: false },
