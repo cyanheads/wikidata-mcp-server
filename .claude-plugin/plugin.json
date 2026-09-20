@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "wikidata-mcp-server",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "description": "Search and fetch Wikidata entities, execute SPARQL queries, and resolve external identifiers via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
