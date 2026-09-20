@@ -1,16 +1,17 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "wikidata-mcp-server",
   "version": "0.1.18",
   "description": "Search and fetch Wikidata entities, execute SPARQL queries, and resolve external identifiers via MCP. STDIO or Streamable HTTP.",
   "author": {
-    "name": "cyanheads"
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
   },
   "homepage": "https://github.com/cyanheads/wikidata-mcp-server#readme",
   "repository": "https://github.com/cyanheads/wikidata-mcp-server",
   "license": "Apache-2.0",
-  "interface": {
-    "displayName": "wikidata-mcp-server"
-  },
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "wikidata", "sparql", "knowledge-graph"],
   "mcpServers": {
     "wikidata-mcp-server": {
       "command": "npx",
