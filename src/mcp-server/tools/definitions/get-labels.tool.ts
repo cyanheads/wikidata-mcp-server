@@ -31,6 +31,8 @@ export const wikidataGetLabels = tool('wikidata_get_labels', {
           'returned under the requested code.',
       ),
   }),
+  // Sibling tools spell these singular; a lone string sent under either is wrapped as a one-element array.
+  inputAliases: { id: 'ids', language: 'languages' },
 
   output: z.object({
     entities: z
@@ -75,7 +77,7 @@ export const wikidataGetLabels = tool('wikidata_get_labels', {
       throw ctx.fail(
         'invalid_ids',
         `Invalid Wikidata IDs: ${invalid.join(', ')}. IDs must be Q+digits or P+digits.`,
-        { invalid, ...ctx.recoveryFor('invalid_ids') },
+        { invalid },
       );
     }
 

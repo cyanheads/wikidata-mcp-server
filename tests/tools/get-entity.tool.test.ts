@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataGetEntity } from '@/mcp-server/tools/definitions/get-entity.tool.js';
 
@@ -765,6 +765,72 @@ describe('wikidataGetEntity', () => {
       expect(text).toContain('793825');
       expect(text).toContain('fields:["labels"]');
       expect(text).toContain('2 sections available');
+    });
+  });
+
+  /**
+   * #33: get_statements and the search/SPARQL tools spell it `language` (a string). The
+   * singular key aliases onto `languages`, and the framework's string-as-array repair wraps a
+   * lone string, so it reaches the handler as an array. Run through runToolContract, which
+   * applies the production pre-validation.
+   */
+  describe('language input alias', () => {
+    type ErrorEnvelope = {
+      error: { code: number; message: string; data?: { recovery?: { hint?: string } } };
+    };
+    const errorOf = (result: { structuredContent?: unknown }) =>
+      (result.structuredContent as ErrorEnvelope).error;
+    const labelsOf = (result: { structuredContent?: unknown }) =>
+      (result.structuredContent as { labels?: Record<string, string> }).labels;
+    /** Raw `tools/call` arguments — deliberately outside the schema's input type. */
+    const call = (args: Record<string, unknown>) =>
+      runToolContract(wikidataGetEntity, args as never);
+
+    it('accepts language as a lone string, reaching the handler as a one-element array', async () => {
+      mockFetchEntity.mockResolvedValue(mockEntity);
+
+      const result = await call({ id: 'Q76', language: 'de', fields: ['labels'] });
+
+      expect(result.isError).toBeFalsy();
+      expect(labelsOf(result)).toEqual({ de: 'Barack Obama' });
+    });
+
+    it('accepts language carrying an explicit array', async () => {
+      mockFetchEntity.mockResolvedValue(mockEntity);
+
+      const result = await call({ id: 'Q76', language: ['en', 'de'], fields: ['labels'] });
+
+      expect(result.isError).toBeFalsy();
+      expect(labelsOf(result)).toEqual({ en: 'Barack Obama', de: 'Barack Obama' });
+    });
+
+    it('keeps the canonical languages key working as before', async () => {
+      mockFetchEntity.mockResolvedValue(mockEntity);
+
+      const result = await call({ id: 'Q76', languages: ['de'], fields: ['labels'] });
+
+      expect(result.isError).toBeFalsy();
+      expect(labelsOf(result)).toEqual({ de: 'Barack Obama' });
+    });
+
+    it('rejects language sent beside languages, naming it as an alias', async () => {
+      const result = await call({ id: 'Q76', language: 'de', languages: ['de'] });
+
+      expect(result.isError).toBe(true);
+      const error = errorOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data?.recovery?.hint).toContain(
+        'language is an alias of languages; send one of them, not both.',
+      );
+      expect(mockFetchEntity).not.toHaveBeenCalled();
+    });
+
+    it('still rejects a wrong type on the canonical languages field', async () => {
+      const result = await call({ id: 'Q76', languages: true });
+
+      expect(result.isError).toBe(true);
+      expect(errorOf(result).code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(mockFetchEntity).not.toHaveBeenCalled();
     });
   });
 

@@ -3,7 +3,8 @@
  * @module tests/tools/get-labels.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataGetLabels } from '@/mcp-server/tools/definitions/get-labels.tool.js';
 
@@ -261,5 +262,84 @@ describe('wikidataGetLabels', () => {
     const ctx = createMockContext({ errors: wikidataGetLabels.errors });
     const input = wikidataGetLabels.input.parse({ ids: ['Q76'] });
     await expect(wikidataGetLabels.handler(input, ctx)).rejects.toThrow('API rate limit');
+  });
+
+  /**
+   * #33: sibling tools spell these singular (`language` on get_statements, `id` on
+   * get_entity). The singular keys alias onto the plural arrays, and the framework's
+   * string-as-array repair wraps a lone string, so both spellings reach the handler as
+   * arrays. Run through runToolContract, which applies the production pre-validation.
+   */
+  describe('singular input aliases', () => {
+    type ErrorEnvelope = {
+      error: { code: number; message: string; data?: { recovery?: { hint?: string } } };
+    };
+    const errorOf = (result: { structuredContent?: unknown }) =>
+      (result.structuredContent as ErrorEnvelope).error;
+    /** Raw `tools/call` arguments — deliberately outside the schema's input type. */
+    const call = (args: Record<string, unknown>) =>
+      runToolContract(wikidataGetLabels, args as never);
+
+    beforeEach(() => {
+      mockFetchLabels.mockResolvedValue({
+        Q42: { labels: { de: 'Douglas Adams' }, descriptions: { de: 'britischer Schriftsteller' } },
+      });
+    });
+
+    it('accepts id and language as lone strings, reaching the handler as one-element arrays', async () => {
+      const result = await call({ id: 'Q42', language: 'de' });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockFetchLabels).toHaveBeenCalledWith(['Q42'], ['de'], expect.anything());
+      expect(result.structuredContent).toMatchObject({ found: 1, languages: ['de'] });
+    });
+
+    it('accepts the aliases carrying explicit arrays', async () => {
+      const result = await call({ id: ['Q42', 'Q76'], language: ['de', 'fr'] });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockFetchLabels).toHaveBeenCalledWith(['Q42', 'Q76'], ['de', 'fr'], expect.anything());
+    });
+
+    it('keeps the canonical keys working as before', async () => {
+      const result = await call({ ids: ['Q42'], languages: ['de'] });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockFetchLabels).toHaveBeenCalledWith(['Q42'], ['de'], expect.anything());
+      expect(result.structuredContent).toMatchObject({ languages: ['de'] });
+    });
+
+    it('rejects id sent beside ids, naming it as an alias', async () => {
+      const result = await call({ id: 'Q42', ids: ['Q42'] });
+
+      expect(result.isError).toBe(true);
+      const error = errorOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data?.recovery?.hint).toContain(
+        'id is an alias of ids; send one of them, not both.',
+      );
+      expect(mockFetchLabels).not.toHaveBeenCalled();
+    });
+
+    it('rejects language sent beside languages, naming it as an alias', async () => {
+      const result = await call({ ids: ['Q42'], language: 'de', languages: ['de'] });
+
+      expect(result.isError).toBe(true);
+      const error = errorOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data?.recovery?.hint).toContain(
+        'language is an alias of languages; send one of them, not both.',
+      );
+      expect(mockFetchLabels).not.toHaveBeenCalled();
+    });
+
+    it('still rejects a wrong type on a canonical field', async () => {
+      const ids = await call({ ids: true });
+      const languages = await call({ ids: ['Q42'], languages: true });
+
+      expect(errorOf(ids).code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(errorOf(languages).code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(mockFetchLabels).not.toHaveBeenCalled();
+    });
   });
 });

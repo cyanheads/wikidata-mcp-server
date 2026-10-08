@@ -164,6 +164,8 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
           'value, returned under the requested code. Omit to return all available languages.',
       ),
   }),
+  // Sibling tools spell it `language`; a lone string sent under it is wrapped as a one-element array.
+  inputAliases: { language: 'languages' },
 
   output: z.object({
     id: z.string().describe('Normalized entity ID (e.g., "Q76" or "P31").'),
@@ -250,7 +252,7 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       reason: 'entity_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'No entity exists at this ID — either unassigned (resource-not-found) or out of range (invalid-path-parameter).',
-      recovery: 'Verify the ID with wikidata_search_entities or check the Wikidata URL directly.',
+      recovery: 'Verify the ID with wikidata_search_entities or wikidata_get_labels.',
     },
     {
       reason: 'invalid_id',
@@ -268,7 +270,6 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       throw ctx.fail(
         'invalid_id',
         `"${input.id}" is not a valid Wikidata ID. Expected Q+digits (item) or P+digits (property).`,
-        { ...ctx.recoveryFor('invalid_id') },
       );
     }
 
@@ -284,9 +285,7 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       entity = await svc.fetchEntity(id, ctx, input.fields);
     } catch (err) {
       if (isEntityNotFoundError(err)) {
-        throw ctx.fail('entity_not_found', `No entity found for ID "${id}".`, {
-          ...ctx.recoveryFor('entity_not_found'),
-        });
+        throw ctx.fail('entity_not_found', `No entity found for ID "${id}".`);
       }
       throw err;
     }
