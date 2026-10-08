@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.20](changelog/0.1.x/0.1.20.md) — 2026-10-08
+
+Singular id and language inputs on wikidata_get_labels and wikidata_get_entity, and mcp-ts-core 0.13.14 adoption: error results carry a request ID, and a numeric string for limit or a lone string for an array such as properties is repaired before validation
+
 ## [0.1.19](changelog/0.1.x/0.1.19.md) — 2026-09-20
 
 mcp-ts-core 0.13.6 adoption: argument rejections classify as InvalidParams with a synthesized recovery hint, a mid-call disconnect classifies as RequestCancelled, and the server declares stateless HTTP sessions explicitly
