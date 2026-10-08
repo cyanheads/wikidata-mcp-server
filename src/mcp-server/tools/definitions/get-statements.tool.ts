@@ -111,7 +111,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
     {
       reason: 'entity_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No entity exists at this QID — either unassigned or out of range.',
+      when: 'No entity exists at this ID — either unassigned or out of range.',
       recovery: 'Verify the ID with wikidata_search_entities or wikidata_get_labels.',
     },
     {
@@ -133,9 +133,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
     const id = normalizeId(input.id);
 
     if (!isQId(id) && !isPId(id)) {
-      throw ctx.fail('invalid_id', `"${input.id}" is not a valid Wikidata ID.`, {
-        ...ctx.recoveryFor('invalid_id'),
-      });
+      throw ctx.fail('invalid_id', `"${input.id}" is not a valid Wikidata ID.`);
     }
 
     /**
@@ -153,7 +151,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
       throw ctx.fail(
         'invalid_property',
         `Invalid property IDs: ${invalidProperties.join(', ')}. Properties must be P followed by digits (e.g., P31).`,
-        { invalid: invalidProperties, ...ctx.recoveryFor('invalid_property') },
+        { invalid: invalidProperties },
       );
     }
 
@@ -170,9 +168,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
       rawStatements = await svc.fetchStatements(id, input.properties, ctx);
     } catch (err) {
       if (isEntityNotFoundError(err)) {
-        throw ctx.fail('entity_not_found', `No entity found for ID "${id}".`, {
-          ...ctx.recoveryFor('entity_not_found'),
-        });
+        throw ctx.fail('entity_not_found', `No entity found for ID "${id}".`);
       }
       throw err;
     }

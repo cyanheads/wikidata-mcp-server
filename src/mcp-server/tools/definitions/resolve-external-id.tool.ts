@@ -175,7 +175,6 @@ export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
       throw ctx.fail(
         'invalid_property',
         `"${input.property}" is not a valid property ID. Expected P followed by digits.`,
-        { ...ctx.recoveryFor('invalid_property') },
       );
     }
 
@@ -197,7 +196,6 @@ export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
         throw ctx.fail(
           'not_external_id_property',
           `Property "${prop}" does not exist on Wikidata.`,
-          { ...ctx.recoveryFor('not_external_id_property') },
         );
       }
       throw err;
@@ -207,7 +205,7 @@ export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
       throw ctx.fail(
         'not_external_id_property',
         `Property ${prop} has data type "${dataType}", not "external-id", so it cannot be resolved as an external identifier.`,
-        { dataType, ...ctx.recoveryFor('not_external_id_property') },
+        { dataType },
       );
     }
 

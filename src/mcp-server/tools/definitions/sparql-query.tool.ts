@@ -121,19 +121,13 @@ export const wikidataSparqlQuery = tool('wikidata_sparql_query', {
       // Re-map service errors to tool error contract reasons
       const e = err as { data?: { reason?: string; status?: number }; code?: number };
       if (e?.data?.reason === 'parse_error') {
-        throw ctx.fail('parse_error', (err as Error).message, {
-          ...ctx.recoveryFor('parse_error'),
-        });
+        throw ctx.fail('parse_error', (err as Error).message);
       }
       if (e?.data?.reason === 'timeout') {
-        throw ctx.fail('timeout', (err as Error).message, {
-          ...ctx.recoveryFor('timeout'),
-        });
+        throw ctx.fail('timeout', (err as Error).message);
       }
       if (e?.data?.reason === 'throttled') {
-        throw ctx.fail('throttled', (err as Error).message, {
-          ...ctx.recoveryFor('throttled'),
-        });
+        throw ctx.fail('throttled', (err as Error).message);
       }
       throw err;
     }

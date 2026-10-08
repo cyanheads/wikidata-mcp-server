@@ -93,7 +93,6 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
       throw ctx.fail(
         'not_an_item',
         `"${input.id}" is not a Q-ID. Only Wikidata items have sitelinks.`,
-        { ...ctx.recoveryFor('not_an_item') },
       );
     }
 
@@ -105,9 +104,7 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
       rawSitelinks = await svc.fetchSitelinks(id, input.sites, ctx);
     } catch (err) {
       if (isEntityNotFoundError(err)) {
-        throw ctx.fail('entity_not_found', `No item found for Q-ID "${id}".`, {
-          ...ctx.recoveryFor('entity_not_found'),
-        });
+        throw ctx.fail('entity_not_found', `No item found for Q-ID "${id}".`);
       }
       throw err;
     }
