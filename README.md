@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.20-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/wikidata-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/wikidata-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/wikidata-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.20-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/wikidata-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/wikidata-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/wikidata-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -57,7 +57,7 @@ All resource data is also reachable via tools.
 
 - Searches labels, aliases, and descriptions
 - `type="item"` for real-world concepts (people, places, works); `type="property"` for predicate P-IDs
-- Language-aware results (BCP 47 language codes)
+- Language-aware results (Wikidata language codes such as `en`, `de`, `pt-br`; case-insensitive)
 - Offset-based pagination, up to 50 results per call
 - Returns match metadata indicating whether the hit was on a label or alias
 
@@ -76,7 +76,7 @@ All resource data is also reachable via tools.
 ### `wikidata_get_labels` <sub>tool</sub>
 
 - Up to 50 IDs per call, batched via the MediaWiki `wbgetentities` API
-- Supports multiple language codes per request
+- Supports multiple language codes per request; every returned language is rendered
 - Reports `found` count and `notFound` IDs for partial-result handling
 - Designed for the common agent pattern: run a SPARQL query, then humanize the QID results
 
@@ -85,9 +85,10 @@ All resource data is also reachable via tools.
 ### `wikidata_get_statements` <sub>tool</sub>
 
 - `properties` parameter fetches only specific P-IDs — omit to return all statements
-- Value QIDs are resolved to human-readable labels by default via a batched label call
+- Item QIDs and quantity units are resolved to human-readable labels by default — in main values, qualifiers, and references — via one batched label call
+- References stay grouped by source, and unknown or explicitly absent values come back as `somevalue` / `novalue`
 - Set `resolve_labels=false` for raw QIDs only (faster, smaller payload)
-- A statement set too large to inline returns an outline of the available P-IDs with byte sizes, largest first, instead of the statements — re-call with `properties` for the ones you need (unfiltered, Q30 carries 467 properties across 1,717 statements)
+- A statement set too large to inline returns an outline of the available P-IDs with byte sizes, largest first, instead of the statements, measured before any label lookup is made — re-call with `properties` naming P-IDs whose sizes sum to 24,000 or less (the `retrieval_notice` names one such set); labels are added after that check (unfiltered, Q30 carries 467 properties across 1,717 statements)
 - Preferred-rank statements represent the most current values
 - Designed for fact verification: "what does Wikidata say about this entity's {property}?"
 
@@ -107,8 +108,11 @@ All resource data is also reachable via tools.
 
 - Full graph power over the Wikidata Query Service (Blazegraph): multi-hop traversals, aggregations, subqueries, OPTIONAL, FILTER, UNION, BIND
 - Standard Wikidata prefixes (`wd:`, `wdt:`, `p:`, `ps:`, `pq:`, `wikibase:`, `bd:`) are auto-injected
-- `wikibase:label` SERVICE auto-injected when `language` is set and the query uses `?<var>Label` variables
-- Results in SPARQL 1.1 JSON format: each binding is `{ type, value, "xml:lang"? }`
+- `wikibase:label` SERVICE auto-injected when the query uses a `?<var>Label`, `?<var>Description`, or `?<var>AltLabel` variable and declares no label SERVICE of its own
+- `language` takes one code or a comma-separated fallback list (`fr,en`); labels fall back to the multilingual (`mul`) label last
+- SELECT queries only — ASK, CONSTRUCT, DESCRIBE, updates, and plain search text are rejected before the request is sent
+- Results in SPARQL 1.1 JSON format: each binding is `{ type, value, "xml:lang"?, datatype? }`; the rendered table quotes literals with their `@lang` or `^^datatype` and shows URIs as prefixed names or `<…>`
+- Each response is held to 64,000 bytes, cut between whole rows: a larger result returns its leading rows on both surfaces with `returnedCount`, `totalCount`, and a notice to page with `ORDER BY` plus `LIMIT`/`OFFSET` or aggregate in the query
 - Hard server timeout is 60s; client-side `timeout` parameter (1–55s) applies earlier
 - Rate-limited at 60 requests/min and 5 concurrent requests per IP
 
@@ -120,6 +124,7 @@ All resource data is also reachable via tools.
 - Automatic value normalization: surrounding whitespace trimmed, resolver URL prefixes stripped (`https://doi.org/`, `https://pubmed.ncbi.nlm.nih.gov/`, `https://orcid.org/`), DOIs uppercased, PMID prefixes stripped, ORCID hyphens normalized
 - The property's data type must be `external-id` — item-valued or media properties (e.g. `P31`, `P18`) are rejected rather than returning an empty match
 - Returns `match=null` when not found (the Query Service lags the live wiki, so a null is not proof of absence)
+- The label comes in the requested `language`, falling back to the entity's multilingual (`mul`) label
 - Returns `multipleMatches` when a Wikidata data integrity issue causes more than one entity to claim the same external ID
 - Designed for cross-server joins with pubmed-mcp-server, crossref-mcp-server, and openalex-mcp-server
 

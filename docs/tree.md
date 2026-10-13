@@ -1,6 +1,6 @@
 # wikidata-mcp-server - Directory Structure
 
-Generated on: 2026-10-08 20:39:50
+Generated on: 2026-10-13 15:00:02
 
 ```text
 wikidata-mcp-server/
@@ -145,14 +145,17 @@ wikidata-mcp-server/
 │   │   │   └── definitions/
 │   │   │       └── entity.resource.ts
 │   │   └── tools/
-│   │       └── definitions/
-│   │           ├── get-entity.tool.ts
-│   │           ├── get-labels.tool.ts
-│   │           ├── get-sitelinks.tool.ts
-│   │           ├── get-statements.tool.ts
-│   │           ├── resolve-external-id.tool.ts
-│   │           ├── search-entities.tool.ts
-│   │           └── sparql-query.tool.ts
+│   │       ├── definitions/
+│   │       │   ├── get-entity.tool.ts
+│   │       │   ├── get-labels.tool.ts
+│   │       │   ├── get-sitelinks.tool.ts
+│   │       │   ├── get-statements.tool.ts
+│   │       │   ├── resolve-external-id.tool.ts
+│   │       │   ├── search-entities.tool.ts
+│   │       │   └── sparql-query.tool.ts
+│   │       ├── language-code.ts
+│   │       ├── statement-format.ts
+│   │       └── utf8-bytes.ts
 │   ├── services/
 │   │   └── wikidata/
 │   │       ├── types.ts
@@ -160,6 +163,10 @@ wikidata-mcp-server/
 │   │       └── wikidata-sparql-service.ts
 │   └── index.ts
 ├── tests/
+│   ├── fixtures/
+│   │   └── wikibase-content-languages.json
+│   ├── helpers/
+│   │   └── scan-cost.ts
 │   ├── prompts/
 │   ├── resources/
 │   │   └── entity.resource.test.ts
@@ -171,9 +178,11 @@ wikidata-mcp-server/
 │       ├── get-labels.tool.test.ts
 │       ├── get-sitelinks.tool.test.ts
 │       ├── get-statements.tool.test.ts
+│       ├── language-code.test.ts
 │       ├── resolve-external-id.tool.test.ts
 │       ├── search-entities.tool.test.ts
-│       └── sparql-query.tool.test.ts
+│       ├── sparql-query.tool.test.ts
+│       └── tool-annotations.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes

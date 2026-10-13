@@ -2,9 +2,9 @@
 
 **Server:** @cyanheads/wikidata-mcp-server
 **Version:** 0.1.20
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.14`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.2.0
+**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
 **Zod:** ^4.6.5
 
 **Domain:** Wikidata knowledge graph — entity search/fetch (REST API v1), SPARQL queries (Wikidata Query Service), batch label resolution (MediaWiki `wbgetentities`), and external ID lookup (DOI, PMID, ORCID, OpenAlex, IMDb).
@@ -221,6 +221,9 @@ src/
   mcp-server/
     tools/definitions/
       *.tool.ts                          # Seven Wikidata tool definitions
+    tools/language-code.ts               # Shared language/languages input schemas
+    tools/statement-format.ts            # Shared markdown rendering of normalized statements
+    tools/utf8-bytes.ts                  # UTF-8 byte length, the unit of every response budget
     resources/definitions/
       entity.resource.ts                 # Compact entity resource
 ```

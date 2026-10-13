@@ -9,9 +9,9 @@
 | `wikidata_search_entities` | Search Wikidata for items or properties by text query. Returns QIDs/PIDs with labels, descriptions, and match metadata. | `query`, `type` (item/property), `language`, `limit` | `readOnlyHint: true` |
 | `wikidata_get_entity` | Fetch a Wikidata entity (item or property) by QID or PID. `fields` narrows the fetch server-side via `?_fields=`, cutting a 300KB+ payload to kilobytes. An entity that still overflows returns a field-category outline. Routes to `/entities/items/{id}` for Q-IDs and `/entities/properties/{id}` for P-IDs. | `id`, `fields` (labels/descriptions/aliases/statements/sitelinks), `languages` | `readOnlyHint: true` |
 | `wikidata_get_labels` | Resolve one or more QIDs/PIDs to their human-readable labels and descriptions in specified languages. Lightweight — no claim data. | `ids` (array), `languages` | `readOnlyHint: true` |
-| `wikidata_get_statements` | Get specific property claims for an entity, with qualifier and reference detail. Resolves value QIDs to labels inline. | `id`, `properties` (P-ID array), `language` | `readOnlyHint: true` |
+| `wikidata_get_statements` | Get specific property claims for an entity, with qualifier and reference detail. Resolves item QIDs and quantity units to labels inline. | `id`, `properties` (P-ID array), `language` | `readOnlyHint: true` |
 | `wikidata_get_sitelinks` | Get Wikipedia and other Wikimedia project URLs for an entity, optionally filtered to specific wiki codes. | `id`, `sites` (optional filter array) | `readOnlyHint: true` |
-| `wikidata_sparql_query` | Execute a SPARQL query against the Wikidata Query Service. Full graph query power for complex traversals, aggregations, and multi-hop joins. | `query` (SPARQL string), `language` (label language), `timeout` | `readOnlyHint: true` |
+| `wikidata_sparql_query` | Execute a SPARQL SELECT query against the Wikidata Query Service. Full graph query power for complex traversals, aggregations, and multi-hop joins. | `query` (SPARQL string), `language` (label language), `timeout` | `readOnlyHint: true` |
 | `wikidata_resolve_external_id` | Look up a Wikidata entity by an external identifier — DOI, PubMed ID, ORCID, OpenAlex ID, etc. Returns the QID and core labels/description. | `property` (P-ID), `value` (external ID string), `language` | `readOnlyHint: true` |
 
 ### Resources
@@ -107,9 +107,9 @@ Each step is independently testable.
 
 - **Items** (Q-IDs): people, places, concepts, works — anything. 100M+ items.
 - **Properties** (P-IDs): the predicates that connect items. ~12K properties. Each has a `data_type` (wikibase-item, external-id, time, quantity, string, url, …).
-- **Statements**: `{ id, rank, value, qualifiers[], references[] }`. Value shape varies by `data_type`.
+- **Statements**: `{ id, rank, value, qualifiers[], references[] }`. Value shape varies by `data_type`. A value can also be `somevalue` (unknown) or `novalue` (explicitly none), which carry no content.
 - **Qualifiers**: additional context for a statement (e.g., a start date on a "position held" claim).
-- **References**: provenance for a statement (e.g., the source database that first recorded it).
+- **References**: provenance for a statement (e.g., the source database that first recorded it). Each reference is an ordered group of property/value parts (`{ hash, parts[] }` upstream); a statement can carry several.
 - **Sitelinks**: connections to Wikipedia articles and other Wikimedia projects across languages. An item can have 300+ sitelinks.
 - **Labels / Descriptions / Aliases**: multilingual display strings. Barack Obama has 113 labels and 242 descriptions.
 
@@ -147,7 +147,7 @@ Adjacent properties with real cross-server value that are **not** external IDs. 
 | — | Client-side field + language filtering | Shapes the response: language narrowing, which the endpoint cannot do, plus a field filter that keeps the returned shape identical whether or not the fetch was narrowed. |
 | — | Overflow check | Over the byte budget, the field categories are returned as an outline instead of the data. |
 
-When `fields` includes `statements`, the handler may optionally make N additional label-fetch calls for value QIDs (deferred to `wikidata_get_statements` which has dedicated label resolution).
+Statements come back raw and unlabelled — no label calls are made here; label resolution lives in `wikidata_get_statements`.
 
 ### `wikidata_get_labels` (1 upstream call)
 
@@ -157,14 +157,14 @@ When `fields` includes `statements`, the handler may optionally make N additiona
 
 Uses MediaWiki API (`wbgetentities`) rather than the REST API because the REST API has no batch label endpoint — individual `/labels/{lang}` calls would be N+1.
 
-### `wikidata_get_statements` (2 upstream calls, parallel)
+### `wikidata_get_statements` (2 upstream steps, sequential)
 
 | # | Call | Purpose |
 |:--|:-----|:--------|
 | 1 | `GET /v1/entities/items/{id}/statements?property={pid}` (Q-IDs) or `GET /v1/entities/properties/{id}/statements` (P-IDs) | Fetch raw statement data — route by ID prefix |
-| 2 | `wbgetentities` batch (parallel) | Resolve value QIDs to human-readable labels |
+| 2 | `wbgetentities` batches of 50, at most 4 in flight | Resolve item QIDs and quantity units — main values, qualifiers, reference parts — to human-readable labels |
 
-The two calls can be parallelized after step 1 returns the value QIDs.
+Step 2 needs the QIDs step 1 returns, and runs only when the unlabelled statement set fits the byte budget — an over-budget set is outlined without it.
 
 ### `wikidata_resolve_external_id` (1 REST call + 1 SPARQL call, sequential)
 
@@ -179,7 +179,7 @@ Uses SPARQL because the REST API has no "get entity by external ID value" endpoi
 
 ### `wikidata_sparql_query` (1 SPARQL call, pass-through)
 
-Raw SPARQL forwarded to the endpoint. Hard 60s server timeout; default client timeout 55s so the error is from our side. Error responses are Java stack traces from Blazegraph — the service layer must parse/strip these down to the meaningful error line.
+Raw SPARQL forwarded to the endpoint; the response is held to a 64,000-byte budget per surface (see the tool design). Hard 60s server timeout; the client timeout defaults to 30s and is capped at 55s so the error is from our side. Error responses are Java stack traces from Blazegraph — the service layer must parse/strip these down to the meaningful error line.
 
 ---
 
@@ -192,13 +192,16 @@ Raw SPARQL forwarded to the endpoint. Hard 60s server timeout; default client ti
 **Input schema:**
 - `query: string` — search terms
 - `type: enum('item', 'property')` — default `'item'`
-- `language: string` — BCP 47 language code for labels/descriptions, default `'en'`
+- `language: string` — Wikidata language code for labels/descriptions, default `'en'`. Shared language-code schema.
 - `limit: number` — 1–50, default `10`
 - `offset: number` — optional pagination offset
 
 **Output:** `{ results: Array<{ id, label, description, match }> }` where `match` conveys whether it was a label or alias match and in which language. The API returns no total count — pagination is offset-only with no result ceiling indicator.
 
 **Enrichment:** `effectiveQuery`, `searchType`, `language`, `resultCount` (always); `notice` (empty-result guidance when `results` is empty).
+
+**Errors:**
+- `invalid_search_parameter` (`ValidationError`): the search endpoint answered 400 — in practice a language it does not search in, such as `mul`. The message names the refused parameter and the value sent (from the endpoint's `context.parameter`), never the upstream URL; the recovery hint suggests a supported code such as `en`. Other upstream statuses keep their default classification.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -215,7 +218,7 @@ Raw SPARQL forwarded to the endpoint. Hard 60s server timeout; default client ti
 **Input schema:**
 - `id: string` — Q-ID (e.g., `"Q76"`) or P-ID (e.g., `"P31"`). Case-insensitive, normalized to uppercase.
 - `fields: array<enum('labels','descriptions','aliases','statements','sitelinks')>` — optional; omit for all fields. Forwarded to `?_fields=`, so it narrows the fetch as well as the response.
-- `languages: array<string>` — optional language filter for labels/descriptions/aliases; omit for all languages. Client-side: the entity endpoint has no language parameter.
+- `languages: array<string>` — optional language filter for labels/descriptions/aliases; omit, or send `[]`, for all languages. Client-side: the entity endpoint has no language parameter. Shared language-code schema; blank entries are dropped.
 
 **Output:** Entity data with only the requested fields, never truncated. The `statements` field preserves full qualifier and reference structure. P-IDs include a `data_type` field; `sitelinks` is absent on property entities.
 
@@ -226,7 +229,7 @@ The governing rule is that **following the notice literally must make progress**
 1. *Pointing at a category `fields` cannot deliver.* One over budget on its own returns the same overflow, so it is redirected to a lever with finer granularity: `statements` → `wikidata_get_statements` (`properties`, by P-ID), `sitelinks` → `wikidata_get_sitelinks` (`sites`, by site code), the language-keyed maps → this tool's own `languages`. On Q30 that redirects `statements` (793,825 bytes) and `sitelinks` (59,631).
 2. *Naming a set that only fits piecewise.* Sizes are additive, so enumerating every category that fits individually can name a re-call that cannot succeed — Q30's `labels` + `descriptions` + `aliases` are 10,431 + 6,848 + 12,447 = 29,726 against 24,000. That notice returns the same outline, which returns the same notice: a closed loop, reachable straight from the default `get_entity(Q30)` path. So the notice packs a subset measured to fit and defers the remainder to a further call.
 
-Both checks go through `sizeOf`, the same serialization the handler uses to decide overflow, so a suggested re-call is validated against the exact predicate that will judge it — the named set provably returns `kind: "full"` in one step, and the first candidate always fits because a category that cannot be delivered alone was already routed elsewhere. The set is emitted as a literal array (`fields:["aliases","labels"]`) rather than a constraint to satisfy ("keep the total under 24000 bytes"), because the caller most likely to loop here is the one least likely to do the arithmetic.
+Both checks go through `sizeOf`, the same serialization and UTF-8 byte count the handler uses to decide overflow, so a suggested re-call is validated against the exact predicate that will judge it — the named set provably returns `kind: "full"` in one step, and the first candidate always fits because a category that cannot be delivered alone was already routed elsewhere. The set is emitted as a literal array (`fields:["aliases","labels"]`) rather than a constraint to satisfy ("keep the total under 24000 bytes"), because the caller most likely to loop here is the one least likely to do the arithmetic.
 
 **Errors:**
 - `entity_not_found` (`NotFound`): no entity exists at this ID. REST answers an unassigned but well-formed ID (`Q99999999`) with HTTP 404 `resource-not-found`, and a syntactically valid but out-of-range ID (`Q999999999999`) with HTTP 400 `invalid-path-parameter` — both mean "no such entity" to a caller and map to this reason.
@@ -242,7 +245,7 @@ Both checks go through `sizeOf`, the same serialization the handler uses to deci
 
 **Input schema:**
 - `ids: array<string>` — 1–50 Q-IDs or P-IDs
-- `languages: array<string>` — BCP 47 language codes; default `['en']`
+- `languages: array<string>` — Wikidata language codes; default `['en']`, which `[]` also gets. Shared language-code schema; blank entries are dropped.
 
 **Output:** `{ entities: Record<id, { labels: Record<lang, string>, descriptions: Record<lang, string> }> }` — only requested languages included.
 
@@ -251,9 +254,9 @@ Both checks go through `sizeOf`, the same serialization the handler uses to deci
 
 An ID that is well-formed but does not resolve is not an error — it is absent from `entities` and listed in `notFound`, so a partial batch still returns its valid members.
 
-**Annotations:** `readOnlyHint: true`, `openWorldHint: false` (given valid IDs, output is deterministic)
+**Annotations:** `readOnlyHint: true`, `openWorldHint: true` (every call reads live data from `wbgetentities`)
 
-**Implementation note:** Uses `wbgetentities` MediaWiki API with `props=labels|descriptions` and `languages` parameter. Supports up to 50 IDs per request; the handler chunks inputs into batches of 50 and parallelizes.
+**Implementation note:** Uses `wbgetentities` MediaWiki API with `props=labels|descriptions` and `languages` parameter. Supports up to 50 IDs per request; `fetchLabels` chunks inputs into batches of 50 and runs at most 4 at once, for every caller — Wikimedia's API etiquette discourages parallel fan-out, and 4 still clears the largest label set an in-budget `wikidata_get_statements` payload carries in two round trips.
 
 A non-resolving ID has two distinct shapes, and they must not be conflated:
 - **Unassigned but in range** (`Q99999999`): arrives inside a normal `entities` map as a per-item `{"id": "Q99999999", "missing": ""}` marker, alongside the valid members. Skip the marked entry.
@@ -267,24 +270,28 @@ Both arrive as HTTP 200 — the error rides in the body, not the status.
 
 ### `wikidata_get_statements`
 
-**Purpose:** Get specific property claims for an entity with full qualifier and reference detail, with value QIDs resolved to human-readable labels inline. Designed for fact verification — "what does Wikidata say about this entity's {property}?".
+**Purpose:** Get specific property claims for an entity with full qualifier and reference detail, with item QIDs and quantity units resolved to human-readable labels inline. Designed for fact verification — "what does Wikidata say about this entity's {property}?".
 
 **Input schema:**
 - `id: string` — Q-ID of the item or P-ID of a property. Routes to `/v1/entities/items/{id}/statements` for Q-IDs and `/v1/entities/properties/{id}/statements` for P-IDs.
 - `properties: array<string>` — P-IDs to fetch (e.g., `["P31", "P569", "P27"]`); omit for all properties. Unfiltered, a well-connected item overflows — see below.
-- `language: string` — language for label resolution, default `'en'`
-- `resolve_labels: boolean` — resolve value QIDs to labels, default `true`
+- `language: string` — language for label resolution, default `'en'`. Shared language-code schema.
+- `resolve_labels: boolean` — resolve item QIDs and quantity unit QIDs to labels at every level, default `true`
 
-**Output:** Map of property ID → array of statements. Each statement includes `rank`, `value` (with resolved label if applicable), `qualifiers` (similarly resolved), and a trimmed `references` summary.
+**Output:** Map of property ID → array of statements. Each statement includes `id`, `rank`, `value`, `qualifiers` (`[{ property, value }]`), and `references` — one entry per upstream reference in upstream order, each `{ parts: [{ property, value }] }` (the upstream `hash` is not carried). With `resolve_labels: true`, item values and quantity units at every level — main value, qualifiers, reference parts — go into one deduplicated `wbgetentities` batch: an item value gains `label`, a quantity gains `unitLabel` beside its unchanged `unit`. A QID absent from the batch response stays bare; with `resolve_labels: false` no label call is made. Qualifier and reference property P-IDs are not labelled.
 
-Over the byte budget the response switches to `kind: "outline"` — every available P-ID with its serialized size, largest first — and the caller re-calls with `properties:[…]`. Unfiltered, Q30 carries 467 properties across 1,717 statements and serializes to 519,077 characters, past what a client can accept at all; the outline of the same call is ~14KB. Sections are the statement map's own keys, so they are already P-IDs — the vocabulary `properties` takes — and the outline needs no new input parameter. Size is measured after normalization and label resolution, because that is the payload the caller actually receives. An entity whose statements sit under a single P-ID is returned whole even when oversized: below two sections there is nothing to choose between, and the only re-call an outline could offer would return the same bytes. Sub-section outlining (splitting one property's statement list) is out of scope.
+Over the byte budget the response switches to `kind: "outline"` — every available P-ID with its serialized size, largest first — and the caller re-calls with `properties:[…]`. Unfiltered, Q30 carries 467 properties across 1,717 statements and serializes to 519,077 characters, past what a client can accept at all; the outline of the same call is ~14KB. Sections are the statement map's own keys, so they are already P-IDs — the vocabulary `properties` takes — and the outline needs no new input parameter. The budget decision is made once, after normalization and before label resolution, and labels never reverse it: a set over budget is outlined at its unlabelled sizes without a `wbgetentities` request (an unfiltered Q30 would otherwise send ~1,150 QIDs in 23 batches only to discard them), and a set that fits is returned with its labels even when they carry it past 24,000 bytes (+8–12% on the largest fitting selections of Q30, Q42, and Q183). Measuring again after labelling made the outline a loop — a selection sized to fit from the outline came back over budget once labelled, as the same outline. Each section is sized as the UTF-8 bytes it adds to a response (`{"P31":[…]}`, key and punctuation included), so sizes are additive upper bounds and any selection summing to the budget or less returns statements. The `retrieval_notice` names one such set as a literal `properties:[…]` array, packed largest-first — never the largest sections, which on a major item each overflow alone. An entity whose statements sit under a single P-ID is returned whole even when oversized: below two sections there is nothing to choose between, and the only re-call an outline could offer would return the same bytes. `labelsResolved` reports what happened rather than echoing `resolve_labels`: it is false on an outline, which fetches no labels. Sub-section outlining (splitting one property's statement list) is out of scope.
 
 Statement value normalization by data type:
 - `wikibase-item` values: `{ qid, label }` (label resolved if `resolve_labels: true`)
+- `wikibase-property`, `wikibase-lexeme`, `wikibase-form`, `wikibase-sense`, `entity-schema` values: `{ type: "entity-id", entityType, id }` — `entityType` is `property` / `lexeme` / `form` / `sense` / `entity-schema`, `id` the bare upstream ID (`P279`, `L37633`, `L229416-F1`, `L1452908-S1`, `E10`). Rendered as the bare ID and never labelled — only item values and quantity units enter the label batch
 - `time` values: `{ time, precision }` — ISO string + precision level (e.g., 11 = day)
-- `quantity` values: `{ amount, unit }` — unit QID resolved to label
-- `external-id`, `string`, `url` values: raw string
+- `quantity` values: `{ amount, unit, upperBound?, lowerBound?, unitLabel? }` — `unit` stays as upstream sends it (an entity URI, or `"1"` when unitless); the bounds are the upstream uncertainty range, verbatim, present only when upstream sends them; `unitLabel` is added when the unit QID resolves. `content[]` renders `+105.4 square kilometre (Q712226)`, or `+105.4 (Q712226)` unresolved, or the bare amount when unitless; a bounded quantity puts its range beside the amount: `+6378.137 [+6378.136, +6378.138] kilometre (Q828224)`
+- `external-id`, `url` values: raw string; `string`, `commonsMedia`, `geo-shape`, `tabular-data`, `math`, `musical-notation` values: raw string under `type: "string"`
 - `monolingualtext` values: `{ text, language }`
+- `globe-coordinate` values: `{ latitude, longitude, precision? }`
+- A data type the server does not know, or a value whose content does not match its data type: `{ type: "other", raw }`, rendered as JSON
+- `somevalue` / `novalue` snaks, at any level and for any data type: `{ type: "somevalue" }` / `{ type: "novalue" }`, rendered "unknown value" / "no value" — never an empty value or an empty QID, and never sent for label lookup
 
 **Errors:**
 - `entity_not_found` (`NotFound`): no item at this QID — HTTP 404 (unassigned) or HTTP 400 (out of range), same as `wikidata_get_entity`
@@ -293,7 +300,7 @@ Statement value normalization by data type:
 
 A well-formed but unassigned P-ID (`P9999999`) is not an error — it returns an empty result, the honest answer to "this entity has no such statements".
 
-**Annotations:** `readOnlyHint: true`
+**Annotations:** `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: true`
 
 ---
 
@@ -312,7 +319,7 @@ A well-formed but unassigned P-ID (`P9999999`) is not an error — it returns an
 - `entity_not_found` (`NotFound`): no item at this QID — HTTP 404 (unassigned) or HTTP 400 (out of range); the sitelinks endpoint returns the same status pair as the items endpoint
 - `not_an_item` (`ValidationError`): a P-ID was supplied — only items (Q-IDs) have sitelinks
 
-**Annotations:** `readOnlyHint: true`
+**Annotations:** `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: true`
 
 ---
 
@@ -320,18 +327,25 @@ A well-formed but unassigned P-ID (`P9999999`) is not an error — it returns an
 
 **Purpose:** Execute an arbitrary SPARQL query against the Wikidata Query Service. Full graph traversal — multi-hop joins, aggregations, subqueries, federated queries. Use for anything beyond single-entity lookups: "all Nobel Prize winners in Chemistry since 2000", "co-authors of an author", "all cities in a country with population > 1M".
 
-The tool handles Wikidata's auto-label SERVICE boilerplate automatically when `language` is specified — the caller doesn't need to include `SERVICE wikibase:label { bd:serviceParam wikibase:language "en" }` manually.
+The tool handles Wikidata's auto-label SERVICE boilerplate automatically when the query references a `?…Label`, `?…Description`, or `?…AltLabel` variable (`$` sigil too) — the caller doesn't need to include `SERVICE wikibase:label { bd:serviceParam wikibase:language "en" }` manually. A query with no such variable, or one that declares its own label SERVICE, is sent without injection.
 
 **Input schema:**
-- `query: string` — SPARQL SELECT query. Must be a SELECT query (not CONSTRUCT/DESCRIBE/ASK). The `wikibase:` prefixes are auto-populated.
-- `language: string` — language for `wikibase:label` service, default `'en'`. Set to `''` to suppress label injection.
+- `query: string` — SPARQL SELECT query. Any other form is rejected before the upstream call (`not_select_query`). The `wikibase:` prefixes are auto-populated.
+- `language: string` — language for the injected `wikibase:label` SERVICE, default `'en'`: one code, or a comma-separated fallback list tried in order (`fr, en` is sent as `fr,en`). The injected list ends in `mul` unless it already names it, since the SERVICE does not fall back to multilingual labels on its own. Shared language-code schema.
 - `timeout: number` — client-side timeout in seconds, 1–55, default `30`. Capped at 55 (server hard limit is 60s).
 
-**Output:** `{ results: Array<Record<string, { type, value, "xml:lang"? }>>, variables: string[], truncated: boolean }` — raw SPARQL bindings with type annotations. Language-tagged literals use the key `"xml:lang"` (not `"lang"`) — this is the SPARQL 1.1 JSON format. `truncated` is always false for SELECT queries (results are complete or the query times out).
+**Output:** `{ results: Array<Record<string, { type, value, "xml:lang"?, datatype? }>>, variables: string[], truncated: boolean }` — raw SPARQL bindings with type annotations. Language-tagged literals use the key `"xml:lang"` (not `"lang"`) — this is the SPARQL 1.1 JSON format. `truncated` is inferred, since the endpoint exposes no truncation flag: `true` when the row count reaches the 10,000-row server cap, `false` otherwise.
+
+**Enrichment:** `totalCount` (rows the query produced) and `returnedCount` (rows in `results`), written on every call; `notice` when the result was cut to the response budget or matched nothing.
+
+**Response budget:** each surface — serialized `structuredContent` and the `content[]` text — is held to 64,000 bytes, cut between whole rows. Each row is charged the larger of its serialized binding and its rendered table row, against what is left once the envelope (variables, header, counts, the longest notice) is paid for, so both surfaces carry the same leading rows. A cut result's `notice` names the re-call: page with `ORDER BY` plus `LIMIT`/`OFFSET`, or aggregate in the query; a first row that alone overflows returns no rows and says to project fewer or shorter values. A result that fits is returned whole.
+
+**`content[]` cells** are Turtle-style: a URI as a prefixed name (`wd:`, `wdt:`, `p:`, `ps:`, `pq:`) or `<…>`, a literal quoted with its `@lang` or `^^datatype` (`"1952-03-11T00:00:00Z"^^xsd:dateTime`), a blank node as `_:id`. `|`, CR, and LF are escaped so a value cannot split a cell or add a row; `structuredContent` keeps every value verbatim.
 
 **Errors:**
-- `parse_error` (`ValidationError`): SPARQL syntax error — includes the relevant error line stripped from the Blazegraph stack trace
-- `timeout` (`ServiceUnavailable`, retryable): query exceeded the time limit — simplify or add LIMIT
+- `not_select_query` (`ValidationError`): the query is not a SELECT — ASK, CONSTRUCT, DESCRIBE, an update form, a comment-only query, or plain text. A handler pre-flight skips whitespace, a BOM, `#` comments, and `BASE`/`PREFIX` declarations (IRIs consumed whole), then requires `SELECT` case-insensitively; no upstream request is made. The recovery hint routes keyword lookups to `wikidata_search_entities`. A prologue the check cannot read (a `PREFIX` missing its colon or IRI) goes upstream as a syntax error.
+- `parse_error` (`ValidationError`): SPARQL syntax error — the cause line stripped from the Blazegraph stack trace, with its `line N, column M` mapped back to the caller's query (the injected prefix lines and label SERVICE are subtracted out), in both the message and `data.cause`
+- `timeout` (`Timeout`, retryable): query exceeded the time limit — simplify or add LIMIT
 - `throttled` (`RateLimited`, retryable): rate limited (60 req/min, 5 concurrent per IP) — retry after `Retry-After` header value
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
@@ -347,7 +361,7 @@ The tool handles Wikidata's auto-label SERVICE boilerplate automatically when `l
 **Input schema:**
 - `property: string` — P-ID of the external ID property (e.g., `"P356"` for DOI, `"P698"` for PubMed ID, `"P496"` for ORCID, `"P10283"` for OpenAlex ID)
 - `value: string` — the external ID value (e.g., `"10.1038/nature01234"`)
-- `language: string` — language for label/description, default `'en'`
+- `language: string` — language for label/description, default `'en'`. Shared language-code schema. A match with no label in that language returns its `mul` label.
 
 **Output:** `{ id, label, description, url }` — QID, display name, description, and Wikidata entity page URL. `null` when no match found (not an error — clean absence signal). A null match is not proof of absence: the Query Service lags the live wiki, so it can also mean "not yet indexed". The `match` field's description says so, since that ambiguity decides whether a caller retries.
 
@@ -447,7 +461,7 @@ Wikimedia blocks requests without a valid User-Agent. Required format per policy
 - **No batch entity fetch via REST.** The REST API has no multi-ID endpoint. Batch label resolution uses the MediaWiki API (`wbgetentities`), not REST. Fetching N full entities requires N REST calls — the server uses parallel fetching where possible.
 - **`_fields` is spelled with an underscore, and the accepted set differs per endpoint.** `?fields=` is silently ignored; only `?_fields=` narrows. The items endpoint takes `type`/`labels`/`descriptions`/`aliases`/`statements`/`sitelinks`, the properties endpoint takes `type`/`data_type`/`labels`/`descriptions`/`aliases`/`statements` — `sitelinks` and `data_type` are each valid on exactly one of them, `id` on neither. An unaccepted value answers HTTP 400 `invalid-query-parameter`, which is the same status an out-of-range ID draws and which `isEntityNotFoundError()` reads as "no such entity". `fetchEntity()` therefore intersects the caller's fields against the endpoint's set instead of forwarding them, or a property asked for `sitelinks` would be reported as missing.
 - **No language selection on entity fetch.** The entity endpoint returns exactly the language keys an entity carries, with no `languages` or `languagefallback` parameter, so language narrowing and `mul` fallback stay client-side. (The MediaWiki batch path used by `wikidata_get_labels` does have `languagefallback=1`.)
-- **Statement value payloads vary by data type.** `wikibase-item`, `time`, `quantity`, `string`, `external-id`, `url`, `monolingualtext`, `globe-coordinate`, `math`, `musical-notation`, `tabular-data`, `geo-shape` — 12+ data types each with different value shapes. The server normalizes to a consistent structure per type, but callers should expect `type` to vary.
+- **Statement value payloads vary by data type.** `wikibase-item`, `wikibase-property`, `wikibase-lexeme`, `wikibase-form`, `wikibase-sense`, `entity-schema`, `time`, `quantity`, `string`, `external-id`, `url`, `commonsMedia`, `monolingualtext`, `globe-coordinate`, `math`, `musical-notation`, `tabular-data`, `geo-shape` — 18 data types each with different value shapes. The server normalizes to a consistent structure per type, but callers should expect `type` to vary.
 - **External ID case sensitivity.** Wikidata stores DOIs uppercase and other external IDs in canonical forms. The `wikidata_resolve_external_id` handler normalizes known cases (whitespace trimming, resolver-URL prefix stripping, DOI uppercasing, PMID prefix stripping, ORCID hyphen normalization), but unlisted properties use the value as-is.
 - **Wikidata data quality is uneven.** Popular entities (Barack Obama, Albert Einstein) are well-maintained. Long-tail items may have sparse labels, missing descriptions, or zero sitelinks. The server faithfully reports what's there — it does not synthesize missing data.
 - **SPARQL endpoint is Blazegraph (planned migration).** Wikimedia has announced intent to migrate away from Blazegraph to a different triplestore. The endpoint URL and SPARQL semantics should be stable, but some Blazegraph-specific extensions (graph traversal algorithms, `bd:sample`) may be discontinued.
@@ -476,17 +490,19 @@ Label resolution is a separate concern from entity data. Agents running SPARQL q
 The REST API has no "find entity by external ID value" endpoint — you can't do `GET /entities/items?P356=10.1038/...`. The SPARQL `SELECT ?item WHERE { ?item wdt:P356 "..." }` pattern is the correct approach. Wrapping it as a named tool with a `property`/`value` interface hides this complexity from callers who don't know SPARQL.
 
 **`wikidata_sparql_query` injects label SERVICE automatically**
-The `SERVICE wikibase:label { bd:serviceParam wikibase:language "en" }` block is required in virtually every practical SPARQL query that uses `?itemLabel` variables. Making agents write this boilerplate for every query is friction with no upside. The service layer injects it when `language` is set (the default) and the query doesn't already include it.
+The `SERVICE wikibase:label { bd:serviceParam wikibase:language "en" }` block is required in virtually every practical SPARQL query that uses `?itemLabel` variables. Making agents write this boilerplate for every query is friction with no upside. The service layer injects it when the query references a label, description, or alias variable and doesn't already include a label SERVICE. There is no off switch: a query that wants no labels names no label variable.
 
-The injection point is the WHERE block's closing brace, found by matching the last `}` that is followed only by what the SPARQL 1.1 grammar permits after the WHERE clause — the solution modifiers (`LIMIT`/`OFFSET`/`ORDER BY`/`GROUP BY`/`HAVING`) or a `ValuesClause` — which is then re-attached after the injection. Recognizing every one of those trailing productions is load-bearing rather than cosmetic: each is a brace-bearing or brace-following construct that can end a query, and a keyword the pattern does not know makes the match slide onto the wrong `}`. A trailing `VALUES ?t { wd:Q5 }` ends the query with its own brace, and injecting there puts a graph pattern inside a data block that accepts only constant terms — a parse error, not a subtly wrong result. Coverage lives in `tests/services/wikidata-sparql-service.test.ts`, which asserts the prepared text sent upstream rather than the private rewriter.
+The injection point is the closing brace of the top-level WHERE group: the first `{` outside a parenthesized projection expression, matched by depth, with braces inside string literals, IRIs, and `#` comments ignored. The SERVICE is spliced inline just before that brace, with no line break, and the text around it is left as written. Matching by depth rather than by what follows a `}` is load-bearing: a sub-SELECT carrying its own `LIMIT` or `GROUP BY` ends in a brace followed by a solution modifier, and injecting there binds labels inside a subquery whose projection drops them; a trailing `VALUES ?t { wd:Q5 }` ends the query with its own brace, and injecting there puts a graph pattern inside a data block that accepts only constant terms. A query whose WHERE group never closes is sent without injection, for the upstream parser to locate. Coverage lives in `tests/services/wikidata-sparql-service.test.ts`, which asserts the prepared text sent upstream.
+
+The injected SERVICE is wrapped in `OPTIONAL { … }`. A plain SERVICE joins on any label variable the caller binds itself (`?item rdfs:label ?itemLabel`), and when the planner runs it first — as it does for a single-valued `VALUES` — it drops every row whose label differs from the one the SERVICE picks. The left join keeps the caller's rows and still binds an unbound label variable; verified live on WDQS, with no measurable cost on a 5,000-row query.
 
 **Overflow returns an outline, not a truncated payload**
-`wikidata_get_statements` and `wikidata_get_entity` can both produce a response too large for a client to accept — 519,077 and 793,897 characters respectively for Q30, hard failures rather than degraded results. Both return an outline rather than a per-tool cap. A cap has to answer which statements survive truncation, and there is no honest answer; an outline drops nothing and hands the choice to the caller, who is the only party that knows what it needs. The fit is that both tools already own the lever the outline points at — `properties` for one, `fields` for the other — so neither needs a new input parameter, only a notice naming the existing one in place of the default `sections:[…]` wording. The budget is `DEFAULT_OUTLINE_BUDGET_BYTES` (24,000), deliberately a code constant rather than an env var, since a deploy-tunable threshold would drift a tool's output *shape* across environments.
+`wikidata_get_statements` and `wikidata_get_entity` can both produce a response too large for a client to accept — 519,077 and 793,897 characters respectively for Q30, hard failures rather than degraded results. Both return an outline rather than a per-tool cap. A cap has to answer which statements survive truncation, and there is no honest answer; an outline drops nothing and hands the choice to the caller, who is the only party that knows what it needs. The fit is that both tools already own the lever the outline points at — `properties` for one, `fields` for the other — so neither needs a new input parameter, only a notice naming the existing one in place of the default `sections:[…]` wording. The budget is `DEFAULT_OUTLINE_BUDGET_BYTES` (24,000), measured — like every listed section size — in UTF-8 bytes of serialized JSON, never `.length`: UTF-16 code units undercount non-Latin text up to threefold, and counted that way Q30's outline offered `fields:["aliases","labels"]` as fitting a set that returned 30,409 bytes. It is deliberately a code constant rather than an env var, since a deploy-tunable threshold would drift a tool's output *shape* across environments.
 
 **An outline may never point at a section it measured as over budget**
 The two tools take the overflow decision differently, and the split is deliberate.
 
-`wikidata_get_statements` uses `outlineOnOverflow` from `@cyanheads/mcp-ts-core/utils` whole. Its short-circuit — return a document with fewer than two sections intact, even over budget — is exactly right there: the only re-call available is the tool's own `properties`, so an outline of one section would cost a round-trip that returns the same bytes.
+`wikidata_get_statements` keeps the short-circuit of `outlineOnOverflow` from `@cyanheads/mcp-ts-core/utils` — return a document with fewer than two sections intact, even over budget — which is exactly right there: the only re-call available is the tool's own `properties`, so an outline of one section would cost a round-trip that returns the same bytes. It takes the decision itself rather than calling the primitive, which measures UTF-16 code units (cyanheads/mcp-ts-core#614): the listed sizes are UTF-8 bytes, and "selections summing to the budget fit" holds only when the decision uses the same unit.
 
 `wikidata_get_entity` measures itself instead (still using the module's `OUTLINE_VARIANT`, `formatOutline`, and budget constant), because that short-circuit assumes the re-call lever is the tool's own selector and here it is not. Every oversized category narrows through a lever `fields` has no vocabulary for — `statements` by P-ID through `wikidata_get_statements`, `sitelinks` by site code through `wikidata_get_sitelinks`, the language-keyed maps through `languages`. The round-trip redirects rather than repeats, so it is worth taking: short-circuiting it returned the ~793KB `fields: ["statements"]` payload the outline exists to prevent.
 
@@ -495,6 +511,12 @@ The same reasoning governs the notice, and generalizes past the single-section c
 The rule that covers all three: a notice may only name a call this tool has already measured as one that will return data. That is a property of the guidance, not of the payload — the tools exist so a calling agent gets guidance that works, and the agent most likely to follow a notice literally is the one least able to recover when it is wrong.
 
 Both tools model the two modes as one flat `z.object` with a `kind` discriminator and presence-based optional arms, because `tool()` rejects a `z.discriminatedUnion` output. Their `format()` renders each arm on field presence and never branches on `kind`: format-parity injects a single synthetic sample with every optional field populated at once, so a mutually-exclusive branch would leave the untaken arm unrendered. The re-call notice is named `retrieval_notice` — it is outline payload the agent acts on, and enrichment merges *after* `output.parse`, so it could only add to a fat result, never replace it with an outline.
+
+**`wikidata_sparql_query` cuts rows to a byte budget instead of outlining**
+A 10,000-row result serializes to ~2.5 MB of `structuredContent`, and rendering every row in `content[]` measures ~609 KB — neither is a response a client should take whole, and rendering only a sample left `content[]` with a fraction of what `structuredContent` carried. Rows have no section to outline, and the caller already owns the lever that reaches the rest (`ORDER BY` with `LIMIT`/`OFFSET`, or aggregation in the query), so the tool returns the leading rows that fit 64,000 bytes on both surfaces and names that lever in the notice. Charging each row the larger of its two renderings keeps the two surfaces cut at the same row. The disclosure uses `returnedCount` and `notice`, not `ctx.enrich.truncated()`, whose `truncated` key would collide with the output field that reports the 10,000-row server cap.
+
+**Every `format()` renders every entry `structuredContent` carries**
+`wikidata_get_entity`, `wikidata_get_labels`, `wikidata_get_statements`, and `wikidata_get_sitelinks` render every label, description, alias, statement (id, value with time/coordinate precision, qualifiers, every reference and part), and sitelink — clients that read only `content[]` see the same data. Each set is already bounded: the 24,000-byte outline budget, 50 IDs times the requested languages, or one item's own sitelinks.
 
 **`wikidata_get_statements` resolves value QIDs to labels by default**
 Raw statement data uses QIDs for item-type values (`"content": "Q76"`). Without label resolution, the agent gets back opaque identifiers it can't act on without a follow-up call. `resolve_labels: true` (the default) batches the value QID → label resolution into the same handler, eliminating a round trip. Callers can opt out for performance when they only need the QIDs.
@@ -512,7 +534,7 @@ SPARQL query optimization (via Blazegraph's `EXPLAIN`) would be useful for devel
 `wikidata_get_sitelinks` covers a specific but high-value use case: "what Wikipedia article corresponds to this QID?". This comes up in research workflows linking Wikidata entities to human-readable references. It's cheap (one REST call) and the URL returned is immediately useful. Kept in the surface.
 
 **No property data type enumeration tool**
-The REST API exposes `/v1/property-data-types` listing Wikidata's 12+ data types. This is developer documentation, not agent-facing functionality. Agents don't need to know the abstract type system — `wikidata_get_statements` handles type normalization internally.
+The REST API exposes `/v1/property-data-types` listing Wikidata's 18 data types. This is developer documentation, not agent-facing functionality. Agents don't need to know the abstract type system — `wikidata_get_statements` handles type normalization internally.
 
 ### 2026-07-14
 
@@ -524,3 +546,20 @@ Stripping `https://doi.org/`-style wrappers after the per-property transform wou
 
 **`normalizeId()` trims, and is the only place that does**
 Every ID-format call site — the entity/statements/sitelinks tools, the batch label tool, and the `wikidata://entity/{id}` resource — runs its `isQId`/`isPId` check on a `normalizeId()` result, so the four tools inherit the trim at once. The resource inherits it only nominally: a URI path segment carries whitespace percent-encoded (`wikidata://entity/ Q76 ` reaches the handler as `%20Q76`), which `.trim()` does not touch, so it still rejects — correctly, since that URI is malformed. `isQId`/`isPId` deliberately do not trim: nothing reaches them without passing through `normalizeId` first, and a second trim would imply otherwise. `wikidata_resolve_external_id` is the lone exception — its bespoke `/^P\d+$/` check bypasses the service helpers and carries its own trim.
+
+### 2026-10-13
+
+**One language-code schema for every `language`/`languages` input**
+All six tools take their language through `src/mcp-server/tools/language-code.ts`. A value is trimmed, lowercased, and `_` becomes `-`; the result must match `^[a-z]{2,8}(-[a-z0-9]{1,9})*$`, which accepts every one of Wikidata's 637 term and 1,474 monolingual-text content-language codes (fixture: `tests/fixtures/wikibase-content-languages.json`) and admits no quote, backslash, brace, `|`, or whitespace — so a code is safe inside a SPARQL string literal. A blank single `language` means `en`, because form clients send `""` for untouched fields; `languages: []` and blank entries behave like an omitted field. The advertised JSON Schema `pattern` is the case- and `_`-tolerant pre-image of that check, not the canonical form: a canonical-only pattern would make validating clients refuse `EN`, which the server accepts. `wikidata_sparql_query` alone takes a comma-separated fallback list, validated entry by entry and advertised as the equivalent single pattern.
+
+**Label SERVICE injection follows label variables, with no off switch**
+`wikidata_sparql_query` injects the label SERVICE only when the query references a `?…Label`, `?…Description`, or `?…AltLabel` variable (either sigil) and declares no label SERVICE itself. The old `language: ""` off switch is gone: it collided with form clients sending `""` for an untouched field, which silently unbound every label. A query that binds its own label variable needs no switch, because the injected SERVICE is wrapped in OPTIONAL and leaves that variable's rows intact.
+
+**Both SPARQL label paths fall back to `mul`**
+Many items carry their name only as a multilingual (`mul`) label. The REST and `wbgetentities` paths already fall back to it, but the Query Service label SERVICE does not: it tries the listed languages and then binds the bare QID. So the injected SERVICE list ends in `mul` unless the caller's list names it (keeping the caller's order), and `wikidata_resolve_external_id` selects the `mul` label beside the requested one and uses it only when the requested one is absent.
+
+**Parse-error positions are mapped back to the caller's query**
+Blazegraph reports a syntax error's `line N, column M` in the text it received, which includes up to nine prepended `PREFIX` lines and the spliced label SERVICE. Both injections are shaped to keep that mapping arithmetic: prefixes are whole lines ahead of the caller's first line, and the SERVICE is spliced on the brace's own line rather than with line breaks that would renumber everything after it. `prepareQuery()` records the prefix-line count and the splice point; the 400/422 branch subtracts the prefix lines and, on the splice line, the SERVICE's length from a column past it. Positions follow Blazegraph's counting, verified live: CRLF, LF, and a lone CR each end a line, a tab is one column, and a character outside the Basic Multilingual Plane is two columns — UTF-16 code units, the same unit as a JavaScript string index. The caller's text is sent untrimmed, so leading blank lines keep their numbering.
+
+**SELECT-only is enforced by a handler pre-flight, not a schema pattern**
+The tool read `results.bindings` from every response, so ASK (a `boolean` body) surfaced as an `InternalError`, and CONSTRUCT/DESCRIBE returned triple rows the output contract does not describe. The handler now checks the query form after the prologue before any upstream call and fails other forms as `not_select_query`. It is a hand scan rather than a schema `.regex()` because JSON Schema `pattern` cannot carry the case-insensitive flag — validating clients would reject a lowercase `select` — and a regex over the prologue would have to model IRIs containing `#`.
