@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-10-13 · ⚠️ Breaking
+
+wikidata_get_statements groups references by source, resolves unit and nested labels, and types more values; wikidata_sparql_query accepts only SELECT and caps responses at 64,000 bytes; language inputs are validated; content[] now carries the full structuredContent data
+
 ## [0.1.20](changelog/0.1.x/0.1.20.md) — 2026-10-08
 
 Singular id and language inputs on wikidata_get_labels and wikidata_get_entity, and mcp-ts-core 0.13.14 adoption: error results carry a request ID, and a numeric string for limit or a lone string for an array such as properties is repaired before validation
