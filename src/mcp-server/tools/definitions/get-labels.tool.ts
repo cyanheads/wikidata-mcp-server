@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { DEFAULT_LANGUAGE, languageCodes } from '@/mcp-server/tools/language-code.js';
 import { getWikidataRestService, normalizeId } from '@/services/wikidata/wikidata-rest-service.js';
 
 export const wikidataGetLabels = tool('wikidata_get_labels', {
@@ -13,7 +14,7 @@ export const wikidataGetLabels = tool('wikidata_get_labels', {
     'Resolve one or more QIDs or PIDs to their human-readable labels and descriptions. ' +
     'Lightweight — returns no claim data. Supports up to 50 IDs per call (batched automatically). ' +
     'Designed for the common agent pattern: receive QIDs from a SPARQL query, then humanize them.',
-  annotations: { readOnlyHint: true, openWorldHint: false },
+  annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
     ids: z
@@ -21,12 +22,11 @@ export const wikidataGetLabels = tool('wikidata_get_labels', {
       .min(1)
       .max(50)
       .describe('Q-IDs (e.g., "Q76") or P-IDs (e.g., "P31") to resolve. 1–50 IDs per call.'),
-    languages: z
-      .array(z.string().min(1))
-      .min(1)
-      .default(['en'])
+    languages: languageCodes([DEFAULT_LANGUAGE])
+      .default([DEFAULT_LANGUAGE])
       .describe(
-        'BCP 47 language codes for returned labels and descriptions (e.g., ["en", "de", "fr"]). ' +
+        'Wikidata language codes for returned labels and descriptions (e.g., ["en", "de", "fr"]). ' +
+          'Case-insensitive; "_" is read as "-"; blank entries are dropped, and an empty list means ["en"]. ' +
           'A language with no label of its own falls back to the entity\'s multilingual ("mul") value, ' +
           'returned under the requested code.',
       ),
@@ -116,17 +116,12 @@ export const wikidataGetLabels = tool('wikidata_get_labels', {
       lines.push(
         `**${id}:** ${primaryLabel ?? id}${primaryDescription ? ` — ${primaryDescription}` : ''}`,
       );
-      // Show a bounded sample of the other requested languages, disclosing the full count
-      // when the sample is cut — structuredContent always carries every language returned.
-      const otherLanguages = availableLanguages.filter((lang) => lang !== primaryLanguage);
-      const otherLangs = otherLanguages.slice(0, 3).map((lang) => {
-        const label = data.labels[lang] ?? id;
+      // Every other returned language, one line each — the same entries structuredContent carries.
+      for (const lang of availableLanguages) {
+        if (lang === primaryLanguage) continue;
         const description = data.descriptions[lang];
-        return `${lang}: ${label}${description ? ` — ${description}` : ''}`;
-      });
-      if (otherLangs.length) {
         lines.push(
-          `  ${otherLangs.join(' | ')}${otherLanguages.length > 3 ? ` … (${availableLanguages.length} total)` : ''}`,
+          `  ${lang}: ${data.labels[lang] ?? id}${description ? ` — ${description}` : ''}`,
         );
       }
     }

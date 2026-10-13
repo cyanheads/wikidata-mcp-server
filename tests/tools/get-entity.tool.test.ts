@@ -315,39 +315,42 @@ describe('wikidataGetEntity', () => {
     expect((result.labels as Record<string, string>).mul).toBe('Barack Obama');
   });
 
-  it('format: discloses the total when the descriptions sample is truncated', () => {
-    const descriptions = Object.fromEntries(
-      ['en', 'de', 'fr', 'es', 'it', 'ja', 'zh', 'pt', 'ru', 'ar'].map((l) => [l, `desc-${l}`]),
-    );
+  it('format: renders every description, the en one also as the headline', () => {
+    const langs = ['en', 'de', 'fr', 'es', 'it', 'ja', 'zh', 'pt', 'ru', 'ar'];
     const blocks = wikidataGetEntity.format!({
       id: 'Q76',
       type: 'item',
       kind: 'full' as const,
-      descriptions,
+      descriptions: Object.fromEntries(langs.map((l) => [l, `desc-${l}`])),
       fieldsReturned: ['descriptions'],
     });
-    const text = (blocks[0] as { text: string }).text;
+    const lines = (blocks[0] as { text: string }).text.split('\n');
 
-    expect(text).toContain('(10 total)');
+    expect(lines).toContain('**Description:** desc-en');
+    expect(lines).toContain('**Descriptions (10):**');
+    for (const lang of langs) expect(lines).toContain(`- ${lang}: desc-${lang}`);
   });
 
-  it('format: omits the descriptions total when nothing was cut', () => {
+  it('format: renders a category present alone, with no en entry', () => {
     const blocks = wikidataGetEntity.format!({
       id: 'Q76',
       type: 'item',
       kind: 'full' as const,
-      descriptions: { en: 'desc-en', de: 'desc-de' },
-      fieldsReturned: ['descriptions'],
+      labels: { de: 'Barack Obama' },
+      fieldsReturned: ['labels'],
     });
-    const text = (blocks[0] as { text: string }).text;
+    const lines = (blocks[0] as { text: string }).text.split('\n');
 
-    expect(text).toContain('de: desc-de');
-    expect(text).not.toContain('total');
+    expect(lines).toContain('**Label:** Barack Obama');
+    expect(lines).toContain('- de: Barack Obama');
   });
 
-  it('format: discloses the alias language total when the list is truncated', () => {
+  it('format: renders every alias in every language', () => {
     const aliases = Object.fromEntries(
-      ['en', 'de', 'fr', 'es', 'it'].map((l) => [l, [`alias-${l}`]]),
+      ['en', 'de', 'fr', 'es', 'it'].map((l) => [
+        l,
+        Array.from({ length: 7 }, (_, i) => `alias-${l}-${i}`),
+      ]),
     );
     const blocks = wikidataGetEntity.format!({
       id: 'Q76',
@@ -356,23 +359,103 @@ describe('wikidataGetEntity', () => {
       aliases,
       fieldsReturned: ['aliases'],
     });
-    const text = (blocks[0] as { text: string }).text;
+    const lines = (blocks[0] as { text: string }).text.split('\n');
 
-    expect(text).toContain('(5 languages total)');
+    expect(lines).toContain('**Aliases (35):**');
+    expect(lines).toContain('- it: alias-it-6');
+    expect(lines.filter((line) => /^- [a-z]+: alias-/.test(line))).toHaveLength(35);
   });
 
-  it('format: omits the alias language total when nothing was cut', () => {
-    const blocks = wikidataGetEntity.format!({
-      id: 'Q76',
-      type: 'item',
-      kind: 'full' as const,
-      aliases: { en: ['Obama'] },
-      fieldsReturned: ['aliases'],
+  /**
+   * #28: full mode rendered 5 labels, en plus 3 descriptions, 3 alias languages of 5 aliases,
+   * and statements and sitelinks as counts plus the enwiki link. Counted on both surfaces here,
+   * past every one of those caps, through runToolContract.
+   */
+  it('carries every entry of every category on both surfaces in full mode (#28)', async () => {
+    const langs = ['en', 'de', 'fr', 'es', 'it', 'nl', 'ja', 'pt'];
+    const snak = (property: string, data_type: string, content: unknown) => ({
+      property: { id: property, data_type },
+      value: { type: 'value', content },
     });
-    const text = (blocks[0] as { text: string }).text;
+    mockFetchEntity.mockResolvedValue({
+      id: 'Q42',
+      type: 'item',
+      labels: Object.fromEntries(langs.map((l) => [l, `Douglas Adams (${l})`])),
+      descriptions: Object.fromEntries(langs.map((l) => [l, `writer (${l})`])),
+      aliases: Object.fromEntries(
+        langs.slice(0, 5).map((l) => [l, Array.from({ length: 7 }, (_, i) => `DNA ${l} ${i}`)]),
+      ),
+      statements: {
+        P31: [{ id: 'Q42$p31', rank: 'normal', ...snak('P31', 'wikibase-item', 'Q5') }],
+        P569: [
+          {
+            id: 'Q42$p569',
+            rank: 'preferred',
+            ...snak('P569', 'time', { time: '+1952-03-11T00:00:00Z', precision: 11 }),
+            qualifiers: [snak('P1480', 'wikibase-item', 'Q5727902')],
+            references: Array.from({ length: 4 }, (_, r) => ({
+              hash: `h${r}`,
+              parts: [
+                snak('P248', 'wikibase-item', `Q${200 + r}`),
+                snak('P813', 'time', { time: '+2022-10-09T00:00:00Z', precision: 11 }),
+              ],
+            })),
+          },
+        ],
+      },
+      sitelinks: Object.fromEntries(
+        Array.from({ length: 40 }, (_, i) => [
+          `l${i}wiki`,
+          { title: `Douglas Adams ${i}`, url: `https://l${i}.wikipedia.org/wiki/DA` },
+        ]),
+      ),
+    });
 
-    expect(text).toContain('Obama');
-    expect(text).not.toContain('languages total');
+    const result = await runToolContract(wikidataGetEntity, { id: 'Q42' });
+    const structured = result.structuredContent as {
+      kind: string;
+      labels: Record<string, string>;
+      descriptions: Record<string, string>;
+      aliases: Record<string, string[]>;
+      statements: Record<string, Array<{ references?: Array<{ parts: unknown[] }> }>>;
+      sitelinks: Record<string, unknown>;
+    };
+    const lines = result.content.flatMap((b) => (b as { text: string }).text.split('\n'));
+    const between = (start: string, re: RegExp) => {
+      const from = lines.indexOf(start);
+      const tail = lines.slice(from + 1);
+      const end = tail.findIndex((line) => !re.test(line));
+      return end === -1 ? tail : tail.slice(0, end);
+    };
+
+    expect(structured.kind).toBe('full');
+    expect(between('**Labels (8):**', /^- /)).toHaveLength(Object.keys(structured.labels).length);
+    expect(between('**Descriptions (8):**', /^- /)).toHaveLength(
+      Object.keys(structured.descriptions).length,
+    );
+    expect(between('**Aliases (35):**', /^- /)).toHaveLength(
+      Object.values(structured.aliases).flat().length,
+    );
+    expect(between('**Sitelinks (40):**', /^- /)).toHaveLength(
+      Object.keys(structured.sitelinks).length,
+    );
+    for (const site of Object.keys(structured.sitelinks)) {
+      expect(lines.some((line) => line.startsWith(`- ${site}: [`))).toBe(true);
+    }
+    const statementCount = Object.values(structured.statements).flat().length;
+    const references = Object.values(structured.statements)
+      .flat()
+      .flatMap((s) => s.references ?? []);
+    expect(lines.filter((line) => line.startsWith('  - id: '))).toHaveLength(statementCount);
+    expect(lines.filter((line) => /^ {4}- Reference \d+$/.test(line))).toHaveLength(
+      references.length,
+    );
+    expect(lines.filter((line) => /^ {6}- P\d+: /.test(line))).toHaveLength(
+      references.flatMap((r) => r.parts).length,
+    );
+    expect(lines).toContain('- Q5');
+    expect(lines).toContain('- +1952-03-11T00:00:00Z (precision 11: day) ★');
+    expect(lines).toContain('  - P1480: Q5727902');
   });
 
   /**
@@ -745,6 +828,74 @@ describe('wikidataGetEntity', () => {
       });
     });
 
+    /**
+     * The budget is UTF-8 bytes. Measured in UTF-16 code units, a CJK-heavy category counts a
+     * third of its wire size: Q30's ["aliases","labels"] was offered as fitting at 30,409 bytes.
+     */
+    describe('the budget is measured in UTF-8 bytes', () => {
+      const utf8 = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
+      const askedFields = (notice: string): string[] => {
+        const match = /fields:(\[[^\]]*\])/.exec(notice);
+        return match?.[1] ? (JSON.parse(match[1]) as string[]) : [];
+      };
+
+      it('outlines a category that is under budget in characters but over it in bytes', async () => {
+        // 9,000 characters, 27,000 bytes.
+        mockFetchEntity.mockResolvedValue({
+          id: 'Q30',
+          type: 'item',
+          labels: { zh: '中'.repeat(9_000) },
+        });
+
+        const result = wikidataGetEntity.output.parse(
+          await wikidataGetEntity.handler(
+            wikidataGetEntity.input.parse({ id: 'Q30', fields: ['labels'] }),
+            createMockContext({ errors: wikidataGetEntity.errors }),
+          ),
+        );
+
+        expect(result.kind).toBe('outline');
+        expect(result.labels).toBeUndefined();
+        expect(result.sections).toEqual([
+          { name: 'labels', bytes: utf8({ zh: '中'.repeat(9_000) }) },
+        ]);
+        expect(result.retrieval_notice).toContain(
+          `labels is ${utf8({ zh: '中'.repeat(9_000) })} bytes`,
+        );
+      });
+
+      it('offers only a fields set whose UTF-8 size fits, and that set returns data', async () => {
+        // Characters: aliases 7,000, labels 7,000, descriptions 12,000. Bytes: 21,000, 21,000, 12,000.
+        const entity = {
+          id: 'Q30',
+          type: 'item' as const,
+          aliases: { zh: ['中'.repeat(7_000)] },
+          labels: { zh: '文'.repeat(7_000) },
+          descriptions: { en: 'd'.repeat(12_000) },
+        };
+        mockFetchEntity.mockResolvedValue(entity);
+        const ctx = createMockContext({ errors: wikidataGetEntity.errors });
+
+        const outline = await wikidataGetEntity.handler(
+          wikidataGetEntity.input.parse({ id: 'Q30' }),
+          ctx,
+        );
+        expect(outline.kind).toBe('outline');
+        const asked = askedFields(outline.retrieval_notice ?? '');
+        expect(asked.length).toBeGreaterThan(0);
+
+        const recall = await wikidataGetEntity.handler(
+          wikidataGetEntity.input.parse({ id: 'Q30', fields: asked }),
+          ctx,
+        );
+        expect(recall.kind).toBe('full');
+        const delivered = Object.fromEntries(
+          asked.map((name) => [name, (recall as Record<string, unknown>)[name]]),
+        );
+        expect(utf8(delivered)).toBeLessThanOrEqual(24_000);
+      });
+    });
+
     it('format: renders the outline sections and the re-call notice', () => {
       const blocks = wikidataGetEntity.format!({
         id: 'Q30',
@@ -854,5 +1005,49 @@ describe('wikidataGetEntity', () => {
     const resultStr = JSON.stringify(result);
     expect(resultStr).not.toContain('entity_secret_abc999');
     delete process.env['TEST_ENTITY_SECRET'];
+  });
+
+  /** #36: one shared language-code schema — normalized, blank entries dropped, [] means all. */
+  describe('language input', () => {
+    const call = (args: Record<string, unknown>) =>
+      runToolContract(wikidataGetEntity, args as never);
+    const labelsOf = (result: { structuredContent?: unknown }) =>
+      (result.structuredContent as { labels?: Record<string, string> }).labels;
+
+    beforeEach(() => {
+      mockFetchEntity.mockResolvedValue(mockEntity);
+    });
+
+    it.each([
+      [['EN'], { en: 'Barack Obama' }],
+      [['', ' De '], { de: 'Barack Obama' }],
+      [[], { en: 'Barack Obama', de: 'Barack Obama' }],
+      [[''], { en: 'Barack Obama', de: 'Barack Obama' }],
+    ])('narrows labels for languages %j', async (languages, expected) => {
+      const result = await call({ id: 'Q76', languages, fields: ['labels'] });
+
+      expect(result.isError).toBeFalsy();
+      expect(labelsOf(result)).toEqual(expected);
+    });
+
+    it('normalizes a lone language sent under the singular alias', async () => {
+      const result = await call({ id: 'Q76', language: 'DE', fields: ['labels'] });
+
+      expect(result.isError).toBeFalsy();
+      expect(labelsOf(result)).toEqual({ de: 'Barack Obama' });
+    });
+
+    it.each([['en" || true || "'], ['{en}'], ['en gb'], ['[AUTO_LANGUAGE]'], ['fr,en']])(
+      'rejects an entry %j as invalid arguments before any upstream call',
+      async (language) => {
+        const result = await call({ id: 'Q76', languages: [language] });
+
+        expect(result.isError).toBe(true);
+        expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
+          JsonRpcErrorCode.InvalidParams,
+        );
+        expect(mockFetchEntity).not.toHaveBeenCalled();
+      },
+    );
   });
 });

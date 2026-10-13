@@ -155,17 +155,13 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
     const others = entries.filter(([code]) => !code.endsWith('wiki'));
     const sorted = [...wikis, ...others];
 
-    for (const [code, sl] of sorted.slice(0, 30)) {
+    for (const [code, sl] of sorted) {
       const url =
         sl.url ??
         `https://${code.replace('wiki', '')}.wikipedia.org/wiki/${encodeURIComponent(sl.title)}`;
       lines.push(
         `**${code}:** [${sl.title}](${url})${sl.badges?.length ? ` [${sl.badges.join(', ')}]` : ''}`,
       );
-    }
-
-    if (sorted.length > 30) {
-      lines.push(`… and ${sorted.length - 30} more sitelinks.`);
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

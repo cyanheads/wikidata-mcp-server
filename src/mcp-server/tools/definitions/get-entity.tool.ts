@@ -11,12 +11,17 @@ import {
   OUTLINE_VARIANT,
   type SectionMeta,
 } from '@cyanheads/mcp-ts-core/utils';
+import { languageCodes } from '@/mcp-server/tools/language-code.js';
+import { statementLines } from '@/mcp-server/tools/statement-format.js';
+import { jsonBytes } from '@/mcp-server/tools/utf8-bytes.js';
+import type { RawStatement } from '@/services/wikidata/types.js';
 import {
   getWikidataRestService,
   isEntityNotFoundError,
   isPId,
   isQId,
   normalizeId,
+  normalizeStatements,
   resolveLangValue,
 } from '@/services/wikidata/wikidata-rest-service.js';
 
@@ -41,21 +46,21 @@ function routeFor(section: string): string {
   }
 }
 
-/** One section per field category, sized by serialized length, largest first. */
+/** One section per field category, sized in serialized UTF-8 bytes, largest first. */
 function sectionsOf(categories: Record<string, unknown>): SectionMeta[] {
   return Object.entries(categories)
-    .map(([name, value]) => ({ name, bytes: JSON.stringify(value).length }))
+    .map(([name, value]) => ({ name, bytes: jsonBytes(value) }))
     .sort((a, b) => b.bytes - a.bytes);
 }
 
 /**
- * Serialized size of the response a `fields:[names]` re-call would produce — the same
+ * Serialized UTF-8 size of the categories a `fields:[names]` re-call would return — the same
  * measurement the handler applies to decide overflow. Every claim the notice makes about a
  * re-call is checked with this, so a suggested call cannot come back as the outline the
  * caller just read.
  */
 function sizeOf(categories: Record<string, unknown>, names: string[]): number {
-  return JSON.stringify(Object.fromEntries(names.map((k) => [k, categories[k]]))).length;
+  return jsonBytes(Object.fromEntries(names.map((k) => [k, categories[k]])));
 }
 
 /**
@@ -155,13 +160,13 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
           'Narrows the upstream fetch as well as the response, so a narrow selection is markedly cheaper. ' +
           'Omit for all fields.',
       ),
-    languages: z
-      .array(z.string())
+    languages: languageCodes([])
       .optional()
       .describe(
-        'Language codes to include in labels, descriptions, and aliases (e.g., ["en", "de"]). ' +
+        'Wikidata language codes to include in labels, descriptions, and aliases (e.g., ["en", "de"]). ' +
+          'Case-insensitive; "_" is read as "-"; blank entries are dropped. ' +
           'A requested language with no label of its own falls back to the entity\'s multilingual ("mul") ' +
-          'value, returned under the requested code. Omit to return all available languages.',
+          'value, returned under the requested code. Omit, or send an empty list, to return all available languages.',
       ),
   }),
   // Sibling tools spell it `language`; a lone string sent under it is wrapped as a one-element array.
@@ -313,7 +318,7 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       return Object.keys(filtered).length ? filtered : undefined;
     };
 
-    /** Cheap metadata — kept in both arms; the overflow primitive returns only kind/sections/notice. */
+    /** Cheap metadata — kept in both arms. */
     const base: Record<string, unknown> = {
       id: entity.id,
       type: entity.type,
@@ -371,12 +376,15 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
      * short-circuiting it would hand back the exact payload the outline exists to prevent —
      * `fields: ["statements"]` on a major item is ~793KB, past what a client can accept.
      *
-     * wikidata_get_statements keeps the primitive: there the only lever IS its own
-     * `properties`, which is the case the short-circuit was written for.
+     * wikidata_get_statements keeps the short-circuit: there the only lever IS its own
+     * `properties`, which is the case it was written for.
+     *
+     * Measured in UTF-8 bytes, not `.length`: UTF-16 code units undercount non-Latin text up
+     * to threefold, so a CJK-heavy category would pass a character check at triple the budget.
      */
     // The output schema defines the full shape — these satisfy it at runtime even though
     // the TypeScript type is widened to Record<string, unknown>.
-    if (JSON.stringify(categories).length > DEFAULT_OUTLINE_BUDGET_BYTES) {
+    if (jsonBytes(categories) > DEFAULT_OUTLINE_BUDGET_BYTES) {
       const sections = sectionsOf(categories);
       ctx.log.info('Entity overflowed — returning outline', { id, sections: sections.length });
       return {
@@ -403,65 +411,51 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       `**Fields returned:** ${result.fieldsReturned.join(', ')} | **Response:** ${result.kind}`,
     );
 
+    // Every entry of every returned category — the same entries structuredContent carries.
     if (result.labels) {
-      const enLabel = result.labels.en;
-      const allLabels = Object.entries(result.labels)
-        .slice(0, 5)
-        .map(([lang, val]) => `${lang}: ${val}`)
-        .join(', ');
-      lines.push(`**Label:** ${enLabel ?? Object.values(result.labels)[0] ?? '(none)'}`);
-      if (Object.keys(result.labels).length > 1) {
-        lines.push(
-          `**Labels (sample):** ${allLabels}${Object.keys(result.labels).length > 5 ? ` … (${Object.keys(result.labels).length} total)` : ''}`,
-        );
-      }
+      const labels = Object.entries(result.labels);
+      lines.push(`**Label:** ${result.labels.en ?? labels[0]?.[1] ?? '(none)'}`);
+      lines.push(`**Labels (${labels.length}):**`);
+      for (const [lang, label] of labels) lines.push(`- ${lang}: ${label}`);
     }
 
     if (result.descriptions) {
-      const enDesc = result.descriptions.en;
-      if (enDesc) {
-        lines.push(`**Description:** ${enDesc}`);
-      }
-      const otherDescEntries = Object.entries(result.descriptions).filter(
-        ([lang]) => lang !== 'en',
-      );
-      const otherDescs = otherDescEntries.slice(0, 3).map(([lang, val]) => `${lang}: ${val}`);
-      if (otherDescs.length) {
-        const total = Object.keys(result.descriptions).length;
-        lines.push(
-          `**Descriptions (sample):** ${otherDescs.join(' | ')}${otherDescEntries.length > 3 ? ` … (${total} total)` : ''}`,
-        );
-      }
+      const descriptions = Object.entries(result.descriptions);
+      if (result.descriptions.en) lines.push(`**Description:** ${result.descriptions.en}`);
+      lines.push(`**Descriptions (${descriptions.length}):**`);
+      for (const [lang, description] of descriptions) lines.push(`- ${lang}: ${description}`);
     }
 
     if (result.aliases) {
-      const aliasEntries = Object.entries(result.aliases);
-      for (const [lang, aliases] of aliasEntries.slice(0, 3)) {
-        if (aliases.length) {
-          lines.push(
-            `**Aliases (${lang}):** ${aliases.slice(0, 5).join(', ')}${aliases.length > 5 ? ` … (${aliases.length} total)` : ''}`,
-          );
-        }
-      }
-      if (aliasEntries.length > 3) {
-        lines.push(`**Aliases:** … (${aliasEntries.length} languages total)`);
-      }
+      const aliases = Object.entries(result.aliases).flatMap(([lang, list]) =>
+        list.map((alias) => `- ${lang}: ${alias}`),
+      );
+      lines.push(`**Aliases (${aliases.length}):**`, ...aliases);
     }
 
     if (result.statements) {
-      const propCount = Object.keys(result.statements).length;
-      const claimCount = Object.values(result.statements).reduce(
-        (acc, stmts) => acc + (stmts as unknown[]).length,
-        0,
+      const statements = Object.fromEntries(
+        Object.entries(result.statements).map(([propertyId, stmts]) => [
+          propertyId,
+          normalizeStatements(propertyId, stmts as unknown as RawStatement[]),
+        ]),
       );
-      lines.push(`**Statements:** ${propCount} properties, ${claimCount} total claims`);
+      const claimCount = Object.values(statements).reduce((acc, stmts) => acc + stmts.length, 0);
+      lines.push(
+        `**Statements:** ${Object.keys(statements).length} properties, ${claimCount} total claims`,
+        ...statementLines(statements),
+      );
     }
 
     if (result.sitelinks) {
-      const sitelinkCount = Object.keys(result.sitelinks).length;
-      const enwiki = result.sitelinks.enwiki as { url?: string; title?: string } | undefined;
-      lines.push(`**Sitelinks:** ${sitelinkCount} total`);
-      if (enwiki) lines.push(`**Wikipedia (en):** ${enwiki.url ?? enwiki.title}`);
+      const sitelinks = Object.entries(result.sitelinks) as Array<
+        [string, { title?: string; url?: string; badges?: string[] }]
+      >;
+      lines.push('', `**Sitelinks (${sitelinks.length}):**`);
+      for (const [site, sl] of sitelinks) {
+        const title = sl.url ? `[${sl.title}](${sl.url})` : sl.title;
+        lines.push(`- ${site}: ${title}${sl.badges?.length ? ` [${sl.badges.join(', ')}]` : ''}`);
+      }
     }
 
     const outlineBlocks = result.sections

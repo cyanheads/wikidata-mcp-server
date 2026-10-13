@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { DEFAULT_LANGUAGE, languageCode } from '@/mcp-server/tools/language-code.js';
 import {
   getWikidataRestService,
   isEntityNotFoundError,
@@ -102,10 +103,13 @@ export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
           '"32283226" for a PubMed ID, "0000-0002-1825-0097" for an ORCID). ' +
           'A resolver URL is accepted for DOI, PubMed, and ORCID — the prefix is stripped before lookup.',
       ),
-    language: z
-      .string()
-      .default('en')
-      .describe('Language code for label and description in the response (e.g., "en", "de").'),
+    language: languageCode()
+      .default(DEFAULT_LANGUAGE)
+      .describe(
+        'Wikidata language code for the label and description in the response (e.g., "en", "de"). ' +
+          'Case-insensitive; "_" is read as "-"; blank means "en". ' +
+          'An entity with no label in this language returns its multilingual ("mul") label.',
+      ),
   }),
 
   output: z.object({
@@ -114,7 +118,9 @@ export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
         id: z.string().describe('Wikidata Q-ID of the matching entity (e.g., "Q12345").'),
         label: z
           .string()
-          .describe('Display label in the requested language, or empty string if unavailable.'),
+          .describe(
+            'Display label in the requested language, else the multilingual ("mul") label, or empty string if neither exists.',
+          ),
         description: z
           .string()
           .describe('Short description in the requested language, or empty string if unavailable.'),
@@ -221,9 +227,16 @@ export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
     // Escape value for SPARQL string literal — double quotes need escaping
     const escapedValue = normalizedValue.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
-    const sparql = `SELECT ?item ?itemLabel ?itemDescription WHERE {
+    /**
+     * The language is a schema-validated code, so it is safe inside a string literal. `mulLabel`
+     * is the multilingual label, which many items carry instead of a per-language one: the REST
+     * tools fall back to it, and the Query Service does not on its own. Descriptions have no
+     * `mul` form, so they take the requested language alone.
+     */
+    const sparql = `SELECT ?item ?itemLabel ?mulLabel ?itemDescription WHERE {
   ?item wdt:${prop} "${escapedValue}" .
   OPTIONAL { ?item rdfs:label ?itemLabel . FILTER(LANG(?itemLabel) = "${input.language}") }
+  OPTIONAL { ?item rdfs:label ?mulLabel . FILTER(LANG(?mulLabel) = "mul") }
   OPTIONAL { ?item schema:description ?itemDescription . FILTER(LANG(?itemDescription) = "${input.language}") }
 }
 LIMIT 5`;
@@ -238,7 +251,7 @@ LIMIT 5`;
     // Extract QIDs
     const matches = bindings.map((b) => ({
       id: b.item?.value.replace('http://www.wikidata.org/entity/', '') ?? '',
-      label: b.itemLabel?.value ?? '',
+      label: b.itemLabel?.value ?? b.mulLabel?.value ?? '',
       description: b.itemDescription?.value ?? '',
     }));
 

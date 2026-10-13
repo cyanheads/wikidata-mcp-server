@@ -3,7 +3,8 @@
  * @module tests/tools/resolve-external-id.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataResolveExternalId } from '@/mcp-server/tools/definitions/resolve-external-id.tool.js';
 
@@ -571,5 +572,134 @@ describe('wikidataResolveExternalId', () => {
 
   it('input validation: empty value is rejected by Zod', () => {
     expect(() => wikidataResolveExternalId.input.parse({ property: 'P356', value: '' })).toThrow();
+  });
+
+  /** The SPARQL text the handler sent — what the label filters were built from. */
+  const sentQuery = () => (mockQuery.mock.calls[0] as [string, ...unknown[]])[0];
+  const call = (args: Record<string, unknown>) =>
+    runToolContract(wikidataResolveExternalId, args as never);
+
+  /**
+   * #36: the language is spliced into SPARQL string literals, so it must be a validated code.
+   * `en" || true || "` used to rewrite the FILTER into one every label language passes.
+   */
+  describe('language input', () => {
+    it.each([
+      ['', 'en'],
+      ['EN', 'en'],
+      ['en_GB', 'en-gb'],
+    ])('filters labels and descriptions for language %j as %j', async (language, expected) => {
+      mockQuery.mockResolvedValue(noResultResponse);
+
+      const result = await call({ property: 'P345', value: 'nm0010930', language });
+
+      expect(result.isError).toBeFalsy();
+      expect(sentQuery()).toContain(`FILTER(LANG(?itemLabel) = "${expected}")`);
+      expect(sentQuery()).toContain(`FILTER(LANG(?itemDescription) = "${expected}")`);
+    });
+
+    it.each([['en" || true || "'], ['en\\'], ['{en}'], ['en gb'], ['[AUTO_LANGUAGE]'], ['fr,en']])(
+      'rejects language %j as invalid arguments before any upstream call',
+      async (language) => {
+        const result = await call({ property: 'P345', value: 'nm0010930', language });
+
+        expect(result.isError).toBe(true);
+        expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
+          JsonRpcErrorCode.InvalidParams,
+        );
+        expect(mockFetchPropertyDataType).not.toHaveBeenCalled();
+        expect(mockQuery).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  /**
+   * #41: many items carry their name only as a multilingual (`mul`) label, and the SPARQL
+   * path filtered on the requested language alone — Q42 came back with an empty label.
+   */
+  describe('mul label fallback', () => {
+    const uri = (qid: string) => ({ type: 'uri', value: `http://www.wikidata.org/entity/${qid}` });
+    const literal = (value: string, lang: string) => ({ type: 'literal', value, 'xml:lang': lang });
+
+    it('also selects the mul label in the query', async () => {
+      mockQuery.mockResolvedValue(noResultResponse);
+
+      await call({ property: 'P345', value: 'nm0010930', language: 'de' });
+
+      expect(sentQuery()).toContain('FILTER(LANG(?itemLabel) = "de")');
+      expect(sentQuery()).toContain('FILTER(LANG(?mulLabel) = "mul")');
+    });
+
+    it('returns the mul label when the requested language has none', async () => {
+      mockQuery.mockResolvedValue({
+        head: { vars: ['item', 'itemLabel', 'mulLabel', 'itemDescription'] },
+        results: {
+          bindings: [
+            {
+              item: uri('Q42'),
+              mulLabel: literal('Douglas Adams', 'mul'),
+              itemDescription: literal('English science fiction writer', 'en'),
+            },
+          ],
+        },
+      });
+
+      const result = await call({ property: 'P345', value: 'nm0010930' });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        match: { id: 'Q42', label: 'Douglas Adams', description: 'English science fiction writer' },
+      });
+      expect(result.content?.[0]).toMatchObject({
+        text: expect.stringContaining('## Douglas Adams'),
+      });
+    });
+
+    it('prefers the requested-language label over the mul label', async () => {
+      mockQuery.mockResolvedValue({
+        head: { vars: ['item', 'itemLabel', 'mulLabel', 'itemDescription'] },
+        results: {
+          bindings: [
+            {
+              item: uri('Q76'),
+              itemLabel: literal('Barack Obama (de)', 'de'),
+              mulLabel: literal('Barack Obama', 'mul'),
+            },
+          ],
+        },
+      });
+
+      const result = await call({ property: 'P345', value: 'nm1682433', language: 'de' });
+
+      expect(result.structuredContent).toMatchObject({ match: { label: 'Barack Obama (de)' } });
+    });
+
+    it('applies the fallback to each entry of multipleMatches', async () => {
+      mockQuery.mockResolvedValue({
+        head: { vars: ['item', 'itemLabel', 'mulLabel'] },
+        results: {
+          bindings: [
+            { item: uri('Q111'), mulLabel: literal('Mul Only', 'mul') },
+            {
+              item: uri('Q222'),
+              itemLabel: literal('English', 'en'),
+              mulLabel: literal('Mul', 'mul'),
+            },
+            { item: uri('Q333') },
+          ],
+        },
+      });
+
+      const result = await call({ property: 'P356', value: '10.1234/dup' });
+
+      expect(result.structuredContent).toMatchObject({
+        match: null,
+        multipleMatches: [
+          { id: 'Q111', label: 'Mul Only' },
+          { id: 'Q222', label: 'English' },
+          { id: 'Q333', label: '' },
+        ],
+      });
+    });
   });
 });

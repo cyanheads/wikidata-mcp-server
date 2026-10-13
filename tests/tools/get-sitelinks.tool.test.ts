@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataGetSitelinks } from '@/mcp-server/tools/definitions/get-sitelinks.tool.js';
 
@@ -188,6 +188,31 @@ describe('wikidataGetSitelinks', () => {
     expect(result.count).toBe(0);
     expect(result.message).toBeDefined();
     expect(result.message).toContain('zwwiki');
+  });
+
+  /** #28: content[] rendered the first 30 sitelinks of Q76's 340. */
+  it('carries every sitelink on both surfaces past the old 30-entry sample (#28)', async () => {
+    const codes = Array.from({ length: 300 }, (_, i) => `l${i}wiki`);
+    codes.push(...Array.from({ length: 40 }, (_, i) => `l${i}wikiquote`));
+    mockFetchSitelinks.mockResolvedValue(
+      Object.fromEntries(
+        codes.map((code) => [code, { title: `Title ${code}`, url: `https://x.org/${code}` }]),
+      ),
+    );
+
+    const result = await runToolContract(wikidataGetSitelinks, { id: 'Q76' });
+    const structured = result.structuredContent as {
+      count: number;
+      sitelinks: Record<string, { title: string }>;
+    };
+    const text = result.content.map((b) => (b as { text: string }).text).join('\n');
+    const rendered = text.split('\n').filter((line) => /^\*\*[a-z0-9_]+:\*\* \[/.test(line));
+
+    expect(structured.count).toBe(340);
+    expect(Object.keys(structured.sitelinks)).toHaveLength(340);
+    expect(rendered).toHaveLength(340);
+    for (const code of codes) expect(text).toContain(`**${code}:** [Title ${code}]`);
+    expect(text).not.toContain('more sitelinks');
   });
 
   it('format: includes badge QIDs when present', () => {

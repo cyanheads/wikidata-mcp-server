@@ -149,47 +149,86 @@ describe('wikidataGetLabels', () => {
   });
 
   /**
-   * The rendered text samples 3 non-English languages; structuredContent carries every
-   * language returned. Without a count, a content[]-only client cannot tell a complete
-   * result from a silently-cut sample.
+   * #28: the rendered text sampled the primary language plus 3 more, so a content[]-only client
+   * could not reach the rest. Every returned language now renders.
    */
-  it('format: discloses the total when the language sample is truncated', () => {
+  it('format: renders every returned language, one line each', () => {
     const langs = ['en', 'de', 'fr', 'es', 'it', 'ja', 'zh', 'pt', 'ru', 'ar'];
     const blocks = wikidataGetLabels.format!({
       entities: {
         Q76: {
           labels: Object.fromEntries(langs.map((l) => [l, `Obama-${l}`])),
-          descriptions: { en: '44th U.S. President' },
+          descriptions: { en: '44th U.S. President', ar: 'رئيس' },
         },
       },
       found: 1,
       notFound: [],
       languages: langs,
     });
-    const text = (blocks[0] as { text: string }).text;
+    const lines = (blocks[0] as { text: string }).text.split('\n');
 
-    expect(text).toContain('(10 total)');
-    // Only the first 3 non-English languages are sampled.
-    expect(text).toContain('de: Obama-de');
-    expect(text).not.toContain('ar: Obama-ar');
+    expect(lines).toContain('**Q76:** Obama-en — 44th U.S. President');
+    for (const lang of langs.slice(1, -1)) expect(lines).toContain(`  ${lang}: Obama-${lang}`);
+    expect(lines).toContain('  ar: Obama-ar — رئيس');
+    expect(lines.join('\n')).not.toContain('total');
   });
 
-  it('format: omits the total when no languages were cut', () => {
+  it('format: renders a language that carries only a description', () => {
     const blocks = wikidataGetLabels.format!({
-      entities: {
-        Q76: {
-          labels: { en: 'Barack Obama', de: 'Barack Obama' },
-          descriptions: {},
-        },
-      },
+      entities: { Q76: { labels: { en: 'Barack Obama' }, descriptions: { de: 'Präsident' } } },
       found: 1,
       notFound: [],
       languages: ['en', 'de'],
     });
-    const text = (blocks[0] as { text: string }).text;
+    const lines = (blocks[0] as { text: string }).text.split('\n');
 
-    expect(text).toContain('de: Barack Obama');
-    expect(text).not.toContain('total');
+    expect(lines).toContain('**Q76:** Barack Obama');
+    expect(lines).toContain('  de: Q76 — Präsident');
+  });
+
+  it('carries the same entries on both surfaces past the old 4-language sample (#28)', async () => {
+    const langs = ['en', 'de', 'fr', 'es', 'it', 'nl', 'ja', 'pt'];
+    mockFetchLabels.mockResolvedValue({
+      Q42: {
+        labels: Object.fromEntries(langs.map((l) => [l, `Adams-${l}`])),
+        descriptions: Object.fromEntries(langs.slice(0, 5).map((l) => [l, `writer-${l}`])),
+      },
+      P31: {
+        labels: Object.fromEntries(langs.slice(0, 6).map((l) => [l, `instance-${l}`])),
+        descriptions: { ja: 'クラス' },
+      },
+    });
+
+    const result = await runToolContract(wikidataGetLabels, {
+      ids: ['Q42', 'P31'],
+      languages: langs,
+    });
+    const structured = result.structuredContent as {
+      entities: Record<
+        string,
+        { labels: Record<string, string>; descriptions: Record<string, string> }
+      >;
+    };
+    const text = result.content.map((b) => (b as { text: string }).text).join('\n');
+
+    const structuredEntries = Object.entries(structured.entities).flatMap(([id, data]) =>
+      [...new Set([...Object.keys(data.labels), ...Object.keys(data.descriptions)])].map(
+        (lang) => `${id}:${lang}`,
+      ),
+    );
+    // Primary line (`**ID:**`) plus one `  lang:` line per other language.
+    const rendered = text
+      .split('\n')
+      .filter((line) => /^(\*\*[QP]\d+:\*\*| {2}[a-z-]+: )/.test(line));
+    expect(structuredEntries).toHaveLength(15);
+    expect(rendered).toHaveLength(structuredEntries.length);
+    for (const [id, data] of Object.entries(structured.entities)) {
+      for (const [lang, value] of Object.entries(data.labels)) {
+        if (lang !== 'en') expect(text).toContain(`  ${lang}: ${value}`);
+      }
+      for (const value of Object.values(data.descriptions)) expect(text).toContain(value);
+      expect(text).toContain(`**${id}:**`);
+    }
   });
 
   it('formats output with not-found IDs', () => {
@@ -341,5 +380,55 @@ describe('wikidataGetLabels', () => {
       expect(errorOf(languages).code).toBe(JsonRpcErrorCode.InvalidParams);
       expect(mockFetchLabels).not.toHaveBeenCalled();
     });
+  });
+
+  /**
+   * #36: one shared language-code schema. Upstream codes are lowercase and case-sensitive —
+   * `EN` used to match nothing, so wbgetentities returned every language the entity carries.
+   */
+  describe('language input', () => {
+    const call = (args: Record<string, unknown>) =>
+      runToolContract(wikidataGetLabels, args as never);
+
+    beforeEach(() => {
+      mockFetchLabels.mockResolvedValue({});
+    });
+
+    it.each([
+      [['EN'], ['en']],
+      [['en-GB', 'en_gb'], ['en-gb']],
+      [
+        ['EN', '', ' de '],
+        ['en', 'de'],
+      ],
+      [[], ['en']],
+      [[''], ['en']],
+    ])('sends languages %j upstream as %j', async (languages, expected) => {
+      const result = await call({ ids: ['Q183'], languages });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockFetchLabels).toHaveBeenCalledWith(['Q183'], expected, expect.anything());
+      expect(result.structuredContent).toMatchObject({ languages: expected });
+    });
+
+    it('normalizes a lone language sent under the singular alias', async () => {
+      const result = await call({ ids: ['Q183'], language: 'EN' });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockFetchLabels).toHaveBeenCalledWith(['Q183'], ['en'], expect.anything());
+    });
+
+    it.each([['en" || true || "'], ['{en}'], ['en gb'], ['[AUTO_LANGUAGE]'], ['fr,en']])(
+      'rejects an entry %j as invalid arguments before any upstream call',
+      async (language) => {
+        const result = await call({ ids: ['Q183'], languages: ['en', language] });
+
+        expect(result.isError).toBe(true);
+        expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
+          JsonRpcErrorCode.InvalidParams,
+        );
+        expect(mockFetchLabels).not.toHaveBeenCalled();
+      },
+    );
   });
 });
