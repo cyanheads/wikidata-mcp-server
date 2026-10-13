@@ -5,21 +5,47 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { serviceUnavailable, validationError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { createPacer, fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type {
+  EntityIdKind,
   NormalizedStatement,
   RawEntity,
   RawSearchResult,
+  RawSnak,
   RawStatement,
+  RawStatementValue,
   StatementValue,
   WbGetEntitiesResponse,
 } from './types.js';
 
 const REST_BASE = 'https://www.wikidata.org/w/rest.php/wikibase/v1';
 const MW_API_BASE = 'https://www.wikidata.org/w/api.php';
+
+/**
+ * Most `wbgetentities` batches the process keeps in flight, across every `fetchLabels` caller.
+ * Wikimedia's API etiquette asks clients not to fan out requests in parallel; 4 still finishes
+ * the largest label set an in-budget `wikidata_get_statements` payload can carry in two round
+ * trips, where unbounded fan-out sent 23 requests at once for one unfiltered Q30 call.
+ */
+const LABEL_BATCH_CONCURRENCY = 4;
+
+/**
+ * The one queue every label batch waits in, module-level so the cap binds the process rather
+ * than one call or one service instance — N concurrent tool calls on a hosted server still put
+ * at most {@link LABEL_BATCH_CONCURRENCY} requests in flight. FIFO, so no caller starves; a
+ * queued batch whose call is cancelled leaves the queue without ever holding a slot. With no
+ * rate window configured it arms no timer, so it needs no teardown.
+ */
+const labelBatchQueue = createPacer({
+  name: 'wikidata-wbgetentities',
+  maxConcurrent: LABEL_BATCH_CONCURRENCY,
+});
+
+/** Most IDs one `wbgetentities` request accepts. */
+const LABEL_BATCH_SIZE = 50;
 
 /**
  * `_fields` values each entity endpoint accepts, verified against the live API.
@@ -75,6 +101,10 @@ export function normalizeId(id: string): string {
   return id.trim().toUpperCase();
 }
 
+/** The HTTP status `fetchWithTimeout` records on a non-2xx rejection. */
+const statusOf = (err: unknown): number | undefined =>
+  (err as { data?: { status?: number } } | null)?.data?.status;
+
 /**
  * True when an error from an entity-addressed REST lookup means "this entity does not exist".
  *
@@ -89,7 +119,7 @@ export function normalizeId(id: string): string {
  * missing entity — classifying it as not-found would report a broken search as an empty one.
  */
 export function isEntityNotFoundError(err: unknown): boolean {
-  const status = (err as { data?: { status?: number } } | null)?.data?.status;
+  const status = statusOf(err);
   return status === 404 || status === 400;
 }
 
@@ -109,6 +139,34 @@ export function resolveLangValue<T>(
   lang: string,
 ): T | undefined {
   return map?.[lang] ?? map?.mul;
+}
+
+/**
+ * Maps a 400 from the search endpoint to `invalid_search_parameter`. The endpoint names the
+ * parameter it refused in `context.parameter` (in practice a language it does not search in,
+ * such as `mul`); the message names that parameter and the value sent, never the upstream URL.
+ */
+function searchRejection(err: unknown, params: URLSearchParams) {
+  const body = (err as { data?: { body?: unknown } }).data?.body;
+  let parameter: string | undefined;
+  try {
+    const named = (JSON.parse(String(body)) as { context?: { parameter?: unknown } }).context
+      ?.parameter;
+    if (typeof named === 'string') parameter = named;
+  } catch {
+    // A body that is not the endpoint's JSON error names no parameter.
+  }
+  const value = parameter === undefined ? null : params.get(parameter);
+  const message =
+    parameter === 'language'
+      ? `The Wikidata search endpoint does not search in language "${value}".`
+      : parameter !== undefined
+        ? `The Wikidata search endpoint rejected the "${parameter}" parameter${value === null ? '' : ` ("${value}")`}.`
+        : 'The Wikidata search endpoint rejected the request as invalid (HTTP 400).';
+  return validationError(message, {
+    reason: 'invalid_search_parameter',
+    ...(parameter !== undefined ? { parameter } : {}),
+  });
 }
 
 export class WikidataRestService {
@@ -169,7 +227,11 @@ export class WikidataRestService {
     });
     const url = `${REST_BASE}/${path}?${params}`;
     ctx.log.debug('Searching entities', { type, query, language, limit, offset });
-    const data = await this.getJson<{ results?: RawSearchResult[] }>(url, ctx);
+    const data = await this.getJson<{ results?: RawSearchResult[] }>(url, ctx).catch(
+      (err: unknown) => {
+        throw statusOf(err) === 400 ? searchRejection(err, params) : err;
+      },
+    );
     return data.results ?? [];
   }
 
@@ -290,6 +352,7 @@ export class WikidataRestService {
     ids: string[],
     languages: string[],
     ctx: Context,
+    signal: AbortSignal,
   ): Promise<WbGetEntitiesResponse> {
     const params = new URLSearchParams({
       action: 'wbgetentities',
@@ -305,7 +368,7 @@ export class WikidataRestService {
       async () => {
         const response = await fetchWithTimeout(url, this.restTimeoutMs, ctx, {
           headers: this.headers,
-          signal: ctx.signal,
+          signal,
         });
         const text = await response.text();
         if (isHtmlResponse(text)) {
@@ -317,14 +380,14 @@ export class WikidataRestService {
         operation: 'WikidataRest.fetchLabels',
         context: ctx,
         baseDelayMs: 1000,
-        signal: ctx.signal,
+        signal,
       },
     );
   }
 
   /**
-   * Batch-resolve labels and descriptions for up to 50 IDs using the MediaWiki
-   * wbgetentities API (the REST API has no batch label endpoint).
+   * Batch-resolve labels and descriptions using the MediaWiki wbgetentities API (the REST API
+   * has no batch label endpoint), {@link LABEL_BATCH_SIZE} IDs per request.
    *
    * IDs absent from the result did not resolve; callers diff against what they requested.
    */
@@ -335,10 +398,9 @@ export class WikidataRestService {
   ): Promise<
     Record<string, { labels: Record<string, string>; descriptions: Record<string, string> }>
   > {
-    // Process in batches of 50
     const batches: string[][] = [];
-    for (let i = 0; i < ids.length; i += 50) {
-      batches.push(ids.slice(i, i + 50));
+    for (let i = 0; i < ids.length; i += LABEL_BATCH_SIZE) {
+      batches.push(ids.slice(i, i + LABEL_BATCH_SIZE));
     }
 
     const results: Record<
@@ -346,52 +408,79 @@ export class WikidataRestService {
       { labels: Record<string, string>; descriptions: Record<string, string> }
     > = {};
 
-    await Promise.all(
-      batches.map(async (batch) => {
-        let remaining = batch.map(normalizeId);
-        ctx.log.debug('Fetching labels batch', { count: remaining.length, languages });
+    const resolveBatch = async (batch: string[], signal: AbortSignal) => {
+      let remaining = batch.map(normalizeId);
+      ctx.log.debug('Fetching labels batch', { count: remaining.length, languages });
 
-        /**
-         * An out-of-range ID (Q999999999999) makes the API reject the whole batch with a
-         * top-level `no-such-entity` error instead of an `entities` map, naming only the
-         * FIRST offending ID — so valid members resolve only if we drop the named ID and
-         * re-request. Each pass removes exactly one ID, so this terminates.
-         *
-         * A merely unassigned ID (Q99999999) is not affected: it arrives inside a normal
-         * `entities` map with a per-item `missing` marker, handled below.
-         */
-        while (remaining.length > 0) {
-          const data = await this.fetchWbEntities(remaining, languages, ctx);
+      /**
+       * An out-of-range ID (Q999999999999) makes the API reject the whole batch with a
+       * top-level `no-such-entity` error instead of an `entities` map, naming only the
+       * FIRST offending ID — so valid members resolve only if we drop the named ID and
+       * re-request. Each pass removes exactly one ID, so this terminates.
+       *
+       * A merely unassigned ID (Q99999999) is not affected: it arrives inside a normal
+       * `entities` map with a per-item `missing` marker, handled below.
+       */
+      while (remaining.length > 0) {
+        const data = await this.fetchWbEntities(remaining, languages, ctx, signal);
 
-          if (data.error) {
-            const badId = data.error.id;
-            if (data.error.code === 'no-such-entity' && badId && remaining.includes(badId)) {
-              ctx.log.debug('Dropping unresolvable ID from labels batch', { id: badId });
-              remaining = remaining.filter((id) => id !== badId);
-              continue;
-            }
-            // Any other top-level error is a real failure — surface it rather than let the
-            // batch collapse into a silent "none of these IDs exist".
-            throw serviceUnavailable(
-              `Wikidata MW API rejected the labels request: ${data.error.info} (${data.error.code})`,
-              { apiErrorCode: data.error.code, retryable: false },
-            );
+        if (data.error) {
+          const badId = data.error.id;
+          if (data.error.code === 'no-such-entity' && badId && remaining.includes(badId)) {
+            ctx.log.debug('Dropping unresolvable ID from labels batch', { id: badId });
+            remaining = remaining.filter((id) => id !== badId);
+            continue;
           }
-
-          for (const [id, entity] of Object.entries(data.entities ?? {})) {
-            if (entity.missing === '') continue;
-            results[id] = {
-              labels: Object.fromEntries(
-                Object.entries(entity.labels ?? {}).map(([lang, lb]) => [lang, lb.value]),
-              ),
-              descriptions: Object.fromEntries(
-                Object.entries(entity.descriptions ?? {}).map(([lang, ds]) => [lang, ds.value]),
-              ),
-            };
-          }
-          return;
+          // Any other top-level error is a real failure — surface it rather than let the
+          // batch collapse into a silent "none of these IDs exist".
+          throw serviceUnavailable(
+            `Wikidata MW API rejected the labels request: ${data.error.info} (${data.error.code})`,
+            { apiErrorCode: data.error.code, retryable: false },
+          );
         }
-      }),
+
+        for (const [id, entity] of Object.entries(data.entities ?? {})) {
+          if (entity.missing === '') continue;
+          results[id] = {
+            labels: Object.fromEntries(
+              Object.entries(entity.labels ?? {}).map(([lang, lb]) => [lang, lb.value]),
+            ),
+            descriptions: Object.fromEntries(
+              Object.entries(entity.descriptions ?? {}).map(([lang, ds]) => [lang, ds.value]),
+            ),
+          };
+        }
+        return;
+      }
+    };
+
+    /**
+     * Every batch waits its turn in the process-wide {@link labelBatchQueue} and holds one slot
+     * from its first request to its last — retry backoff and drop-and-retry passes included —
+     * so the cap counts batches in progress.
+     *
+     * The call's batches share one signal: the caller's, joined with `stop`, which the first
+     * batch to fail fires before its slot is released. Aborting it pulls this call's queued
+     * batches out of the queue unstarted and cuts its in-flight ones short, so a failed or
+     * cancelled call frees its slots for other callers at once; their batches carry their own
+     * signals and never see it.
+     */
+    const stop = new AbortController();
+    const signal = AbortSignal.any([ctx.signal, stop.signal]);
+    await Promise.all(
+      batches.map((batch) =>
+        labelBatchQueue.run(
+          async (batchSignal) => {
+            try {
+              await resolveBatch(batch, batchSignal);
+            } catch (err) {
+              stop.abort(err);
+              throw err;
+            }
+          },
+          { signal },
+        ),
+      ),
     );
 
     return results;
@@ -402,22 +491,45 @@ export class WikidataRestService {
 // Statement value normalization
 // ---------------------------------------------------------------------------
 
-/** Normalize a raw statement value to the domain type. */
+/**
+ * The non-item entity-ID data types, keyed to the entity kind their value names. Upstream
+ * sends each value as the bare ID string (`"P279"`, `"L37633"`, `"L229416-F1"`, `"E10"`).
+ */
+const ENTITY_ID_KINDS: Record<string, EntityIdKind | undefined> = {
+  'wikibase-property': 'property',
+  'wikibase-lexeme': 'lexeme',
+  'wikibase-form': 'form',
+  'wikibase-sense': 'sense',
+  'entity-schema': 'entity-schema',
+};
+
+/**
+ * Normalize a raw snak value to the domain type.
+ *
+ * `somevalue` (an unknown value) and `novalue` (an explicit absence) carry no `content` and
+ * keep their own types whatever the property's data type — read as content they would
+ * collapse to an empty value, and an item-typed one to a `wikibase-item` with no QID.
+ */
 export function normalizeStatementValue(
   dataType: string | undefined | null,
-  rawContent: unknown,
+  raw: RawStatementValue | undefined,
 ): StatementValue {
+  if (raw?.type === 'somevalue' || raw?.type === 'novalue') return { type: raw.type };
+
+  const rawContent = raw?.content;
   const effective = dataType ?? 'string';
 
   if (effective === 'wikibase-item') {
-    const content = rawContent as { id?: string } | string | null;
-    if (typeof content === 'object' && content !== null && 'id' in content) {
-      return { type: 'wikibase-item', qid: content.id ?? '' };
-    }
-    if (typeof content === 'string') {
-      return { type: 'wikibase-item', qid: content };
-    }
-    return { type: 'wikibase-item', qid: String(rawContent ?? '') };
+    const content = rawContent as { id?: string } | string | null | undefined;
+    const qid = typeof content === 'string' ? content : content?.id;
+    return qid ? { type: 'wikibase-item', qid } : { type: 'other', raw: rawContent };
+  }
+
+  const entityType = ENTITY_ID_KINDS[effective];
+  if (entityType) {
+    return typeof rawContent === 'string' && rawContent
+      ? { type: 'entity-id', entityType, id: rawContent }
+      : { type: 'other', raw: rawContent };
   }
 
   if (effective === 'time') {
@@ -429,12 +541,21 @@ export function normalizeStatementValue(
   }
 
   if (effective === 'quantity') {
-    const content = rawContent as { amount?: string; unit?: string } | null;
+    const content = rawContent as {
+      amount?: string;
+      unit?: string;
+      upperBound?: string;
+      lowerBound?: string;
+    } | null;
     if (typeof content === 'object' && content !== null) {
-      const unit = content.unit;
-      return unit !== undefined
-        ? { type: 'quantity', amount: content.amount ?? '', unit }
-        : { type: 'quantity', amount: content.amount ?? '' };
+      const { unit, upperBound, lowerBound } = content;
+      return {
+        type: 'quantity',
+        amount: content.amount ?? '',
+        ...(unit !== undefined ? { unit } : {}),
+        ...(upperBound !== undefined ? { upperBound } : {}),
+        ...(lowerBound !== undefined ? { lowerBound } : {}),
+      };
     }
     return { type: 'other', raw: rawContent };
   }
@@ -484,43 +605,77 @@ export function normalizeStatementValue(
   return { type: 'other', raw: rawContent };
 }
 
-/** Normalize a raw statement array to domain statements. */
+/**
+ * The Q-ID a quantity unit names: `http://www.wikidata.org/entity/Q712226` → `Q712226`.
+ * Undefined for the unitless `"1"` and for any unit that is not a Wikidata entity URI.
+ */
+export function unitQid(unit: string | undefined): string | undefined {
+  return unit?.match(/^https?:\/\/www\.wikidata\.org\/entity\/(Q\d+)$/)?.[1];
+}
+
+/** Every snak a statement carries: its main value, its qualifiers, and each reference's parts. */
+function* statementSnaks(raw: RawStatement): Generator<RawSnak> {
+  yield raw;
+  yield* raw.qualifiers ?? [];
+  for (const ref of raw.references ?? []) yield* ref.parts ?? [];
+}
+
+/** The Q-ID a normalized value needs a label for — an item value or a quantity unit. */
+function labelQidOf(value: StatementValue): string | undefined {
+  if (value.type === 'wikibase-item') return value.qid;
+  return value.type === 'quantity' ? unitQid(value.unit) : undefined;
+}
+
+/**
+ * The Q-IDs a statement set needs labels for — item values and quantity units at every level
+ * (main value, qualifiers, reference parts) — deduplicated for one `fetchLabels` batch. Reads
+ * each snak through `normalizeStatementValue`, so `somevalue`/`novalue` never contribute.
+ */
+export function collectLabelQids(rawStatements: RawStatement[]): Set<string> {
+  const qids = new Set<string>();
+  for (const raw of rawStatements) {
+    for (const snak of statementSnaks(raw)) {
+      const qid = labelQidOf(normalizeStatementValue(snak.property?.data_type, snak.value));
+      if (qid) qids.add(qid);
+    }
+  }
+  return qids;
+}
+
+/** Normalize one snak, attaching `label` / `unitLabel` when its Q-ID resolved in `labelMap`. */
+function normalizeSnakValue(snak: RawSnak, labelMap?: Record<string, string>): StatementValue {
+  const value = normalizeStatementValue(snak.property?.data_type, snak.value);
+  const qid = labelQidOf(value);
+  const label = qid ? labelMap?.[qid] : undefined;
+  if (!label) return value;
+  if (value.type === 'wikibase-item') return { ...value, label };
+  if (value.type === 'quantity') return { ...value, unitLabel: label };
+  return value;
+}
+
+/**
+ * Normalize a raw statement array to domain statements. `labelMap` (Q-ID → label) labels
+ * item values and quantity units at every level; a Q-ID absent from it stays bare.
+ */
 export function normalizeStatements(
   propertyId: string,
   rawStatements: RawStatement[],
   labelMap?: Record<string, string>,
 ): NormalizedStatement[] {
+  const toSnak = (snak: RawSnak) => ({
+    property: snak.property?.id ?? '',
+    value: normalizeSnakValue(snak, labelMap),
+  });
+
   return rawStatements.map((raw) => {
-    const dataType = raw.property?.data_type;
-    const rawValue = normalizeStatementValue(dataType, raw.value?.content);
-
-    // Resolve label for wikibase-item values
-    const value: StatementValue =
-      rawValue.type === 'wikibase-item'
-        ? {
-            type: 'wikibase-item',
-            qid: rawValue.qid,
-            ...(labelMap?.[rawValue.qid] != null ? { label: labelMap[rawValue.qid] } : {}),
-          }
-        : rawValue;
-
-    const qualifiers = raw.qualifiers?.map((q) => ({
-      property: q.property?.id ?? '',
-      value: normalizeStatementValue(q.property?.data_type, q.value?.content),
-    }));
-
-    const references = raw.references?.flatMap((ref) =>
-      (ref.parts ?? []).map((part) => ({
-        property: part.property?.id ?? '',
-        value: normalizeStatementValue(part.property?.data_type, part.value?.content),
-      })),
-    );
+    const qualifiers = raw.qualifiers?.map(toSnak);
+    const references = raw.references?.map((ref) => ({ parts: (ref.parts ?? []).map(toSnak) }));
 
     return {
       id: raw.id,
       rank: raw.rank,
       property: propertyId,
-      value,
+      value: normalizeSnakValue(raw, labelMap),
       ...(qualifiers?.length ? { qualifiers } : {}),
       ...(references?.length ? { references } : {}),
     };

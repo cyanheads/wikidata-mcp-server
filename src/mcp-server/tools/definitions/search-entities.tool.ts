@@ -4,6 +4,8 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { DEFAULT_LANGUAGE, languageCode } from '@/mcp-server/tools/language-code.js';
 import { getWikidataRestService } from '@/services/wikidata/wikidata-rest-service.js';
 
 export const wikidataSearchEntities = tool('wikidata_search_entities', {
@@ -26,11 +28,11 @@ export const wikidataSearchEntities = tool('wikidata_search_entities', {
       .describe(
         'Entity type to search. Use "item" for Q-IDs (people, places, concepts) or "property" for P-IDs (predicates).',
       ),
-    language: z
-      .string()
-      .default('en')
+    language: languageCode()
+      .default(DEFAULT_LANGUAGE)
       .describe(
-        'BCP 47 language code for returned labels and descriptions (e.g., "en", "de", "zh").',
+        'Wikidata language code for returned labels and descriptions (e.g., "en", "de", "zh-hant"). ' +
+          'Case-insensitive; "_" is read as "-"; blank means "en".',
       ),
     limit: z
       .number()
@@ -100,6 +102,17 @@ export const wikidataSearchEntities = tool('wikidata_search_entities', {
         'Recovery hint when results are empty — echoes filters and suggests how to broaden. Absent when results are present.',
       ),
   },
+
+  errors: [
+    {
+      reason: 'invalid_search_parameter',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The search endpoint refused a request parameter, in practice a language it does not search in such as "mul".',
+      recovery:
+        'Retry with a language code the search endpoint supports, such as "en" or "de"; "mul" labels entities but cannot be searched in. If the message names another parameter, correct that value.',
+      thrownBy: 'service',
+    },
+  ],
 
   async handler(input, ctx) {
     const svc = getWikidataRestService();

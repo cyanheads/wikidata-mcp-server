@@ -33,26 +33,36 @@ export type RawSitelink = {
   badges?: string[];
 };
 
-/** Raw statement value content shapes (varies by data type). */
+/**
+ * Raw snak value. `value` carries `content`, whose shape varies by data type; `somevalue`
+ * (an unknown value) and `novalue` (an explicit absence) carry no `content`.
+ */
 export type RawStatementValue = {
-  type: string;
-  content: unknown;
+  type: 'value' | 'somevalue' | 'novalue';
+  content?: unknown;
 };
 
-/** Raw statement object. */
-export type RawStatement = {
-  id: string;
-  rank: 'normal' | 'preferred' | 'deprecated';
+/** Raw snak — a property/value pair. The main value, each qualifier, and each reference part are one. */
+export type RawSnak = {
   property: {
     id: string;
     data_type?: string | null;
   };
   value: RawStatementValue;
-  qualifiers?: RawStatement[];
-  references?: Array<{
-    hash?: string;
-    parts?: RawStatement[];
-  }>;
+};
+
+/** Raw reference: an ordered group of snaks citing one source. */
+export type RawReference = {
+  hash?: string;
+  parts?: RawSnak[];
+};
+
+/** Raw statement object. */
+export type RawStatement = RawSnak & {
+  id: string;
+  rank: 'normal' | 'preferred' | 'deprecated';
+  qualifiers?: RawSnak[];
+  references?: RawReference[];
 };
 
 /** Raw REST entity response (items or properties). */
@@ -131,11 +141,24 @@ export type SearchResult = {
   };
 };
 
+/** The entity kind a non-item entity-ID value names — one per Wikibase entity-ID data type. */
+export type EntityIdKind = 'property' | 'lexeme' | 'form' | 'sense' | 'entity-schema';
+
 /** Normalized statement value. */
 export type StatementValue =
   | { type: 'wikibase-item'; qid: string; label?: string | undefined }
+  /** A property, lexeme, form, sense, or entity-schema reference (`P279`, `L37633-F1`, `E10`) — never labelled. */
+  | { type: 'entity-id'; entityType: EntityIdKind; id: string }
   | { type: 'time'; time: string; precision: number }
-  | { type: 'quantity'; amount: string; unit?: string | undefined; unitLabel?: string | undefined }
+  | {
+      type: 'quantity';
+      amount: string;
+      unit?: string | undefined;
+      /** Uncertainty range, verbatim from upstream; absent on an unbounded quantity. */
+      upperBound?: string | undefined;
+      lowerBound?: string | undefined;
+      unitLabel?: string | undefined;
+    }
   | { type: 'string' | 'external-id' | 'url'; value: string }
   | { type: 'monolingualtext'; text: string; language: string }
   | {
@@ -144,7 +167,12 @@ export type StatementValue =
       longitude: number;
       precision?: number | undefined;
     }
+  /** An unknown value (`somevalue`) or an explicit absence (`novalue`) — no data by design. */
+  | { type: 'somevalue' | 'novalue' }
   | { type: 'other'; raw: unknown };
+
+/** Normalized snak — a qualifier or a reference part. */
+export type NormalizedSnak = { property: string; value: StatementValue };
 
 /** Normalized statement. */
 export type NormalizedStatement = {
@@ -152,6 +180,7 @@ export type NormalizedStatement = {
   rank: 'normal' | 'preferred' | 'deprecated';
   property: string;
   value: StatementValue;
-  qualifiers?: Array<{ property: string; value: StatementValue }>;
-  references?: Array<{ property: string; value: StatementValue }>;
+  qualifiers?: NormalizedSnak[];
+  /** One entry per upstream reference, in upstream order, each holding its own parts. */
+  references?: Array<{ parts: NormalizedSnak[] }>;
 };

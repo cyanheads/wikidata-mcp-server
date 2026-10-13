@@ -5,9 +5,18 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { formatOutline, OUTLINE_VARIANT, outlineOnOverflow } from '@cyanheads/mcp-ts-core/utils';
+import {
+  DEFAULT_OUTLINE_BUDGET_BYTES,
+  formatOutline,
+  OUTLINE_VARIANT,
+  type SectionMeta,
+} from '@cyanheads/mcp-ts-core/utils';
+import { DEFAULT_LANGUAGE, languageCode } from '@/mcp-server/tools/language-code.js';
+import { statementLines } from '@/mcp-server/tools/statement-format.js';
+import { jsonBytes } from '@/mcp-server/tools/utf8-bytes.js';
 import type { NormalizedStatement } from '@/services/wikidata/types.js';
 import {
+  collectLabelQids,
   getWikidataRestService,
   isEntityNotFoundError,
   isPId,
@@ -16,15 +25,47 @@ import {
   normalizeStatements,
 } from '@/services/wikidata/wikidata-rest-service.js';
 
+/**
+ * The outline's re-call notice. Following it must return statements, so its example is a
+ * literal `properties` set packed largest-first (first fit) within the budget — never the
+ * largest sections, which on a major item each overflow alone. Sizes are additive upper
+ * bounds (see the extractor in the handler), so the sum a caller computes is a safe test.
+ */
+function retrievalNotice(totalBytes: number, sections: SectionMeta[]): string {
+  const budget = DEFAULT_OUTLINE_BUDGET_BYTES;
+  const chosen: string[] = [];
+  let sum = 0;
+  for (const section of sections) {
+    if (sum + section.bytes <= budget) {
+      chosen.push(section.name);
+      sum += section.bytes;
+    }
+  }
+  const parts = [
+    `Statement set too large to inline: ${totalBytes} bytes against a ${budget}-byte budget.`,
+  ];
+  parts.push(
+    chosen.length > 0
+      ? `Re-call wikidata_get_statements with the same id plus properties:[...] naming the P-IDs you need — e.g. properties:${JSON.stringify(chosen)}, a set measured to fit the budget.`
+      : 'Every property here is larger than the budget on its own; re-call wikidata_get_statements with the same id plus properties:[...] naming one P-ID per call.',
+  );
+  parts.push(
+    `Sizes add up: any selection whose listed sizes sum to ${budget} bytes or less returns its statements, and a property requested alone is always returned whole.`,
+  );
+  return parts.join(' ');
+}
+
 export const wikidataGetStatements = tool('wikidata_get_statements', {
   title: 'Get Wikidata Statements',
   description:
     'Fetch property claims for a Wikidata entity with qualifier and reference detail. ' +
-    'Value QIDs are resolved to human-readable labels by default. ' +
+    'Item QIDs and quantity units — in values, qualifiers, and references — are resolved to human-readable labels by default. ' +
     'Use the properties parameter to fetch only specific P-IDs — omitting it returns every statement, ' +
     'and a well-connected item (a country, a major city) carries hundreds of properties: more than fits inline. ' +
-    'An oversized set comes back as kind: "outline" — every available P-ID with its byte size, largest first — ' +
-    'instead of the statements; re-call with the same id plus properties:[...] naming the P-IDs you want. ' +
+    'A set over 24,000 bytes before labels comes back as kind: "outline" — every available P-ID with its byte size, largest first — ' +
+    'instead of the statements; re-call with the same id plus properties:[...] naming P-IDs whose sizes sum to 24,000 or less ' +
+    '(the retrieval_notice names one such set). Labels are added after that check, so a returned set can run past 24,000 bytes by their size, ' +
+    'and a property requested alone is always returned whole — on a major item one property can run to hundreds of kilobytes. ' +
     'Designed for fact verification: "what does Wikidata say about this entity\'s {property}?". ' +
     'Preferred-rank statements are the most current values.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
@@ -40,15 +81,18 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
       .describe(
         'P-IDs to fetch (e.g., ["P31", "P569", "P27"]). Omit to return all properties (may be large for major items).',
       ),
-    language: z
-      .string()
-      .default('en')
-      .describe('Language code for label resolution of QID values (e.g., "en", "de").'),
+    language: languageCode()
+      .default(DEFAULT_LANGUAGE)
+      .describe(
+        'Wikidata language code for label resolution of QID values (e.g., "en", "de"). ' +
+          'Case-insensitive; "_" is read as "-"; blank means "en".',
+      ),
     resolve_labels: z
       .boolean()
       .default(true)
       .describe(
-        'Resolve wikibase-item value QIDs to human-readable labels via a batched label call. ' +
+        'Resolve item QIDs (label) and quantity unit QIDs (unitLabel) to human-readable labels via one batched label call, ' +
+          'covering main values, qualifiers, and reference parts. ' +
           'Set to false to skip label resolution and return raw QIDs only (faster, smaller payload).',
       ),
   }),
@@ -62,7 +106,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
           'so sections lists the P-IDs available instead; re-call with properties:[...] to retrieve specific ones. ' +
           'The counts below are reported either way.',
       ),
-    // Statement values are from a dynamic external API (12+ data types, each with a different shape).
+    // Statement values are from a dynamic external API (18 data types, each with a different shape).
     // Passthrough preserves all normalized fields in structuredContent without over-typing each branch.
     statements: z
       .record(z.string(), z.array(z.object({}).passthrough()))
@@ -70,7 +114,9 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
       .describe(
         'Map of property ID to array of normalized statements. ' +
           'Each statement has id, rank, property, value (with type-specific fields), ' +
-          'and optional qualifiers and references arrays. Present in full mode; omitted in outline mode.',
+          'optional qualifiers ([{ property, value }]), and optional references — ' +
+          'one entry per source in upstream order, each { parts: [{ property, value }] }. ' +
+          'Present in full mode; omitted in outline mode.',
       ),
     sections: z
       .array(
@@ -80,8 +126,9 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
       )
       .optional()
       .describe(
-        'Present when kind = outline: the P-IDs this entity carries statements for, largest first. ' +
-          'Copy names into the properties input to retrieve them.',
+        'Present when kind = outline: the P-IDs this entity carries statements for, largest first, each sized as ' +
+          'the UTF-8 bytes it adds to a response before labels. Sizes add up: copy names whose sizes sum to 24,000 or less ' +
+          'into the properties input to retrieve them.',
       ),
     // Named retrieval_notice, not notice: it is part of the outline payload the agent acts
     // on, not additive agent-facing context. Enrichment is merged *after* output.parse and
@@ -103,7 +150,9 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
     labelsResolved: z
       .boolean()
       .describe(
-        'True when QID values were resolved to labels. False when resolve_labels was set to false.',
+        'True when the returned statements had labels resolved: resolve_labels was true and kind is full, so every item QID ' +
+          'and quantity unit that resolved carries its label. False when resolve_labels was false, and on an outline, ' +
+          'which carries no statements and makes no label lookup.',
       ),
   }),
 
@@ -173,88 +222,79 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
       throw err;
     }
 
-    // Collect all value QIDs for label resolution
-    const labelMap: Record<string, string> = {};
-    if (input.resolve_labels) {
-      const qidsToResolve = new Set<string>();
+    const normalizeAll = (labelMap: Record<string, string>) =>
+      Object.fromEntries(
+        Object.entries(rawStatements).map(([propertyId, stmts]) => [
+          propertyId,
+          normalizeStatements(propertyId, stmts, labelMap),
+        ]),
+      ) as Record<string, NormalizedStatement[]>;
 
-      /** Extract QID from a wikibase-item content value. */
-      const extractQid = (content: unknown): string | undefined => {
-        if (typeof content === 'string') return content;
-        const c = content as { id?: string } | null;
-        return c?.id ?? undefined;
-      };
+    /**
+     * The budget decision is made once, on the unlabelled set, and labels never reverse it.
+     * Sizing with labels would mean resolving them for a set about to be outlined — every
+     * batch discarded (#40) — and measuring after labelling made the outline a loop: a
+     * selection sized to fit from the outline came back over budget once labelled, as the
+     * same outline. So a set that fits unlabelled is returned with its labels, which can
+     * carry the response past the budget by their own size.
+     *
+     * Sections are P-IDs — the vocabulary the `properties` input speaks — each sized as the
+     * UTF-8 bytes it adds to a response (`{"P31":[…]}`, key and punctuation included). Sizes
+     * are therefore additive upper bounds: any selection whose sizes sum to the budget or less
+     * measures within it on the re-call, and so returns statements.
+     *
+     * The decision is this tool's own rather than `outlineOnOverflow`'s, which measures
+     * UTF-16 code units (cyanheads/mcp-ts-core#614): a CJK-heavy set would pass it at up to
+     * three times the budget, and sizes listed in bytes would no longer sum against the unit
+     * the decision used. It keeps the primitive's single-section short-circuit: an entity
+     * whose statements sit under one P-ID is returned whole even when oversized, since the
+     * only re-call an outline could offer would return the same bytes.
+     */
+    let normalized = normalizeAll({});
+    const totalBytes = jsonBytes(normalized);
+    const sections: SectionMeta[] | undefined =
+      totalBytes > DEFAULT_OUTLINE_BUDGET_BYTES && Object.keys(normalized).length > 1
+        ? Object.entries(normalized)
+            .map(([name, value]) => ({ name, bytes: jsonBytes({ [name]: value }) }))
+            .sort((a, b) => b.bytes - a.bytes)
+        : undefined;
 
-      for (const stmts of Object.values(rawStatements)) {
-        for (const stmt of stmts) {
-          if (stmt.property?.data_type === 'wikibase-item') {
-            const qid = extractQid(stmt.value?.content);
-            if (qid) qidsToResolve.add(qid);
-          }
-          for (const q of stmt.qualifiers ?? []) {
-            if (q.property?.data_type === 'wikibase-item') {
-              const qid = extractQid(q.value?.content);
-              if (qid) qidsToResolve.add(qid);
-            }
-          }
-        }
-      }
-
+    /** One label batch for item values and quantity units at every level, for a set that fits. */
+    const labelsResolved = input.resolve_labels && !sections;
+    if (labelsResolved) {
+      const qidsToResolve = collectLabelQids(Object.values(rawStatements).flat());
       if (qidsToResolve.size > 0) {
         const labelData = await svc.fetchLabels([...qidsToResolve], [input.language], ctx);
+        const labelMap: Record<string, string> = {};
         for (const [qid, data] of Object.entries(labelData)) {
           const label = data.labels[input.language];
           if (label) labelMap[qid] = label;
         }
+        normalized = normalizeAll(labelMap);
       }
-    }
-
-    // Normalize statements
-    const normalized: Record<string, NormalizedStatement[]> = {};
-    for (const [propertyId, stmts] of Object.entries(rawStatements)) {
-      normalized[propertyId] = normalizeStatements(propertyId, stmts, labelMap);
     }
 
     const statementCount = Object.values(normalized).reduce((acc, stmts) => acc + stmts.length, 0);
 
-    /** Cheap metadata — kept in both arms; the overflow primitive returns only kind/sections/notice. */
+    /** Cheap metadata — kept in both arms. */
     const base = {
       id,
       propertyCount: Object.keys(normalized).length,
       statementCount,
-      labelsResolved: input.resolve_labels,
+      labelsResolved,
     };
 
-    /**
-     * Sections are the statement map's top-level keys — P-IDs — which is already the
-     * vocabulary the `properties` input speaks, so the outline points at an existing lever
-     * and the default extractor is the right one. Measured after normalization and label
-     * resolution because that is the payload the caller actually receives.
-     *
-     * An entity whose statements sit under a single P-ID is returned whole even when
-     * oversized: the primitive short-circuits below two sections, since the only re-call an
-     * outline could offer would return the same bytes.
-     */
-    const overflow = outlineOnOverflow(normalized, {
-      notice: (sections) =>
-        `Statement set too large to inline. Re-call wikidata_get_statements with the same id plus ` +
-        `properties:[...] naming the P-IDs you need — e.g. ${sections
-          .slice(0, 3)
-          .map((s) => s.name)
-          .join(', ')}.`,
-    });
-
-    if (overflow.kind === 'outline') {
+    if (sections) {
       ctx.log.info('Statement set overflowed — returning outline', {
         id,
         propertyCount: base.propertyCount,
-        sections: overflow.sections.length,
+        sections: sections.length,
       });
       return {
         ...base,
         kind: 'outline',
-        sections: overflow.sections,
-        retrieval_notice: overflow.notice,
+        sections,
+        retrieval_notice: retrievalNotice(totalBytes, sections),
       } as never;
     }
 
@@ -272,34 +312,9 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
       `**Properties:** ${result.propertyCount} | **Total statements:** ${result.statementCount} | **Labels resolved:** ${result.labelsResolved} | **Response:** ${result.kind}`,
     ];
 
-    for (const [propId, rawStmts] of Object.entries(result.statements ?? {})) {
-      lines.push('');
-      lines.push(`### ${propId}`);
-      for (const rawStmt of rawStmts) {
-        const stmt = rawStmt as NormalizedStatement;
-        if (!stmt?.value) continue;
-        const rankIndicator =
-          stmt.rank === 'preferred' ? ' ★' : stmt.rank === 'deprecated' ? ' ~~(deprecated)~~' : '';
-        const valueStr = formatStatementValue(stmt.value);
-        lines.push(`- ${valueStr}${rankIndicator}`);
-        if (stmt.qualifiers?.length) {
-          for (const q of stmt.qualifiers) {
-            if (!q?.value) continue;
-            lines.push(`  - ${q.property}: ${formatStatementValue(q.value)}`);
-          }
-        }
-        if (stmt.references?.length) {
-          const shownReferences = stmt.references.slice(0, 3);
-          lines.push(
-            `  - **References (${shownReferences.length}${stmt.references.length > shownReferences.length ? ` of ${stmt.references.length}` : ''}):**`,
-          );
-          for (const reference of shownReferences) {
-            if (!reference?.value) continue;
-            lines.push(`    - ${reference.property}: ${formatStatementValue(reference.value)}`);
-          }
-        }
-      }
-    }
+    lines.push(
+      ...statementLines((result.statements ?? {}) as Record<string, NormalizedStatement[]>),
+    );
 
     const outlineBlocks = result.sections
       ? formatOutline({
@@ -312,30 +327,3 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
     return [{ type: 'text', text: lines.join('\n') }, ...outlineBlocks];
   },
 });
-
-function formatStatementValue(value: NormalizedStatement['value']): string {
-  switch (value.type) {
-    case 'wikibase-item':
-      return value.label ? `${value.label} (${value.qid})` : value.qid;
-    case 'time':
-      return value.time;
-    case 'quantity':
-      return value.unitLabel
-        ? `${value.amount} ${value.unitLabel}`
-        : value.unit && value.unit !== '1'
-          ? `${value.amount} (${value.unit})`
-          : value.amount;
-    case 'string':
-    case 'external-id':
-    case 'url':
-      return value.value;
-    case 'monolingualtext':
-      return `${value.text} [${value.language}]`;
-    case 'globe-coordinate':
-      return `${value.latitude}, ${value.longitude}`;
-    case 'other':
-      return JSON.stringify(value.raw ?? '');
-    default:
-      return '(unknown)';
-  }
-}

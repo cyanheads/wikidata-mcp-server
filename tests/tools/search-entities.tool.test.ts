@@ -3,7 +3,8 @@
  * @module tests/tools/search-entities.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { JsonRpcErrorCode, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataSearchEntities } from '@/mcp-server/tools/definitions/search-entities.tool.js';
 
@@ -183,5 +184,86 @@ describe('wikidataSearchEntities', () => {
     // Handler should not crash and result should be empty
     expect(result.results).toHaveLength(0);
     expect(mockSearch).toHaveBeenCalledWith(injection, 'item', 'en', 10, 0, expect.anything());
+  });
+
+  /** #36: one shared language-code schema — normalized, blank means en, hostile values rejected. */
+  describe('language input', () => {
+    const call = (args: Record<string, unknown>) =>
+      runToolContract(wikidataSearchEntities, args as never);
+
+    it.each([
+      ['EN', 'en'],
+      ['en-GB', 'en-gb'],
+      ['en_gb', 'en-gb'],
+      ['', 'en'],
+      ['  ', 'en'],
+    ])('sends language %j upstream as %j', async (language, expected) => {
+      mockSearch.mockResolvedValue([]);
+
+      const result = await call({ query: 'Douglas Adams', language });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockSearch).toHaveBeenCalledWith(
+        'Douglas Adams',
+        'item',
+        expected,
+        10,
+        0,
+        expect.anything(),
+      );
+    });
+
+    it.each([
+      ['en" || true || "'],
+      ['en\\'],
+      ['{en}'],
+      ['en|de'],
+      ['en gb'],
+      ['[AUTO_LANGUAGE]'],
+      ['fr,en'],
+    ])('rejects language %j as invalid arguments before any upstream call', async (language) => {
+      const result = await call({ query: 'Douglas Adams', language });
+
+      expect(result.isError).toBe(true);
+      expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
+        JsonRpcErrorCode.InvalidParams,
+      );
+      expect(mockSearch).not.toHaveBeenCalled();
+    });
+  });
+
+  /** #42: the service's typed search rejection is a declared reason with a recovery hint. */
+  it('surfaces invalid_search_parameter with its declared recovery hint', async () => {
+    mockSearch.mockRejectedValue(
+      validationError('The Wikidata search endpoint does not search in language "mul".', {
+        reason: 'invalid_search_parameter',
+        parameter: 'language',
+      }),
+    );
+
+    const result = await runToolContract(wikidataSearchEntities, {
+      query: 'Douglas Adams',
+      language: 'mul',
+    } as never);
+
+    expect(result.isError).toBe(true);
+    const error = (
+      result.structuredContent as {
+        error: {
+          code: number;
+          message: string;
+          data: { reason: string; recovery: { hint: string } };
+        };
+      }
+    ).error;
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data.reason).toBe('invalid_search_parameter');
+    expect(error.data.recovery.hint).toContain('"en"');
+    expect(result.content?.[0]).toMatchObject({
+      text: expect.stringContaining(error.data.recovery.hint),
+    });
+    expect(wikidataSearchEntities.errors?.map((e) => e.reason)).toContain(
+      'invalid_search_parameter',
+    );
   });
 });
