@@ -29,7 +29,7 @@
 
 ## Overview
 
-Wikidata's knowledge graph — entity search and lookup over the REST API v1, graph traversal via SPARQL against the Query Service, batch label resolution through MediaWiki, and external identifier resolution (DOI, PMID, ORCID, OpenAlex, IMDb). Search, fetch, and traverse entities from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Wikidata's knowledge graph. Search and fetch entities, traverse the graph with SPARQL, and resolve external identifiers like DOI, PMID, ORCID, OpenAlex, and IMDb to their Wikidata items. No API key required.
 
 ### Tools
 
@@ -55,78 +55,58 @@ All resource data is also reachable via tools.
 
 ### `wikidata_search_entities` <sub>tool</sub>
 
-- Searches labels, aliases, and descriptions
-- `type="item"` for real-world concepts (people, places, works); `type="property"` for predicate P-IDs
-- Language-aware results (Wikidata language codes such as `en`, `de`, `pt-br`; case-insensitive)
-- Offset-based pagination, up to 50 results per call
-- Returns match metadata indicating whether the hit was on a label or alias
+- Searches labels, aliases, and descriptions; `type="item"` for people, places, and works, `type="property"` for P-IDs
+- Takes a Wikidata language code (`en`, `de`, `pt-br`; case-insensitive); offset pagination, up to 50 results per call
+- Each hit includes match metadata saying whether it matched a label or alias
 
 ---
 
 ### `wikidata_get_entity` <sub>tool</sub>
 
-- Q-IDs (e.g. `Q76`) fetch items; P-IDs (e.g. `P31`) fetch properties — endpoint routing is automatic
-- `fields` parameter selects `labels`, `descriptions`, `aliases`, `statements`, or `sitelinks`
-- `fields` narrows the upstream fetch, not just the response — Q76 is 344,114 bytes whole, 6,703 for `labels` alone
-- `languages` parameter filters multilingual maps to specific language codes, client-side (the entity endpoint takes no language parameter)
-- An entity too large to inline returns a field-category outline with byte sizes instead of the data — follow its `retrieval_notice`: it names a literal `fields` set already measured to fit (category sizes are additive, so requesting every name listed would overflow again), defers the remainder to a further call, and redirects a category too large to deliver whole (statements or sitelinks on a major item) to the tool that can narrow it
+- Q-IDs (e.g. `Q76`) fetch items and P-IDs (e.g. `P31`) fetch properties; `fields` selects `labels`, `descriptions`, `aliases`, `statements`, or `sitelinks`, and narrows the upstream fetch (Q76 is 344,114 bytes whole, 6,703 for `labels` alone)
+- `languages` filters multilingual maps to the given language codes
+- An entity too large to inline returns an outline of field categories with byte sizes; its `retrieval_notice` names a `fields` set that fits and points oversized statements or sitelinks to the tool that can narrow them
 
 ---
 
 ### `wikidata_get_labels` <sub>tool</sub>
 
-- Up to 50 IDs per call, batched via the MediaWiki `wbgetentities` API
-- Supports multiple language codes per request; every returned language is rendered
-- Reports `found` count and `notFound` IDs for partial-result handling
-- Designed for the common agent pattern: run a SPARQL query, then humanize the QID results
+- Up to 50 IDs per call via the MediaWiki `wbgetentities` API, with one or more language codes per request
+- Reports a `found` count and `notFound` IDs for partial results
+- Meant to follow a SPARQL query: run it, then humanize the QIDs
 
 ---
 
 ### `wikidata_get_statements` <sub>tool</sub>
 
-- `properties` parameter fetches only specific P-IDs — omit to return all statements
-- Item QIDs and quantity units are resolved to human-readable labels by default — in main values, qualifiers, and references — via one batched label call
-- References stay grouped by source, and unknown or explicitly absent values come back as `somevalue` / `novalue`
-- Set `resolve_labels=false` for raw QIDs only (faster, smaller payload)
-- A statement set too large to inline returns an outline of the available P-IDs with byte sizes, largest first, instead of the statements, measured before any label lookup is made — re-call with `properties` naming P-IDs whose sizes sum to 24,000 or less (the `retrieval_notice` names one such set); labels are added after that check (unfiltered, Q30 carries 467 properties across 1,717 statements)
-- Preferred-rank statements represent the most current values
-- Designed for fact verification: "what does Wikidata say about this entity's {property}?"
+- `properties` limits the fetch to specific P-IDs (omit for all); item QIDs and quantity units in values, qualifiers, and references are resolved to labels unless `resolve_labels=false`
+- References stay grouped by source; unknown or absent values come back as `somevalue` / `novalue`
+- A statement set too large to inline returns an outline of P-IDs with byte sizes, largest first (unfiltered, Q30 carries 467 properties across 1,717 statements); re-call with `properties` whose sizes sum to 24,000 or less, as the `retrieval_notice` suggests
 
 ---
 
 ### `wikidata_get_sitelinks` <sub>tool</sub>
 
-- Maps site codes (e.g., `enwiki`) to article titles and URLs
-- `sites` parameter filters to specific site codes
-- `wikis_only=true` returns only Wikipedia links (excludes Wiktionary, Wikiquote, Wikisource, etc.)
-- Major items can have 300+ sitelinks across languages
-- Only Q-IDs (items) have sitelinks — P-IDs are not supported
+- Maps site codes (e.g. `enwiki`) to article titles and URLs; `sites` filters to specific codes
+- `wikis_only=true` keeps only Wikipedia links (drops Wiktionary, Wikiquote, Wikisource, etc.)
+- Q-IDs only; P-IDs are not supported
 
 ---
 
 ### `wikidata_sparql_query` <sub>tool</sub>
 
-- Full graph power over the Wikidata Query Service (Blazegraph): multi-hop traversals, aggregations, subqueries, OPTIONAL, FILTER, UNION, BIND
-- Standard Wikidata prefixes (`wd:`, `wdt:`, `p:`, `ps:`, `pq:`, `wikibase:`, `bd:`) are auto-injected
-- `wikibase:label` SERVICE auto-injected when the query uses a `?<var>Label`, `?<var>Description`, or `?<var>AltLabel` variable and declares no label SERVICE of its own
-- `language` takes one code or a comma-separated fallback list (`fr,en`); labels fall back to the multilingual (`mul`) label last
-- SELECT queries only — ASK, CONSTRUCT, DESCRIBE, updates, and plain search text are rejected before the request is sent
-- Results in SPARQL 1.1 JSON format: each binding is `{ type, value, "xml:lang"?, datatype? }`; the rendered table quotes literals with their `@lang` or `^^datatype` and shows URIs as prefixed names or `<…>`
-- Each response is held to 64,000 bytes, cut between whole rows: a larger result returns its leading rows on both surfaces with `returnedCount`, `totalCount`, and a notice to page with `ORDER BY` plus `LIMIT`/`OFFSET` or aggregate in the query
-- Hard server timeout is 60s; client-side `timeout` parameter (1–55s) applies earlier
-- Rate-limited at 60 requests/min and 5 concurrent requests per IP
+- Runs SELECT queries against the Wikidata Query Service (Blazegraph); ASK, CONSTRUCT, DESCRIBE, updates, and plain search text are rejected before the request is sent
+- Standard prefixes (`wd:`, `wdt:`, `p:`, `ps:`, `pq:`, `wikibase:`, `bd:`) and the `wikibase:label` SERVICE (when the query uses a `?<var>Label`, `?<var>Description`, or `?<var>AltLabel` variable) are added automatically; `language` takes one code or a fallback list like `fr,en`
+- Results are SPARQL 1.1 JSON bindings, capped at 64,000 bytes per response and cut between whole rows; a larger result returns its leading rows with `returnedCount`, `totalCount`, and a notice to page with `ORDER BY` plus `LIMIT`/`OFFSET` or to aggregate
+- Client `timeout` is 1–55s (server hard limit 60s); rate limit is 60 requests/min and 5 concurrent requests per IP
 
 ---
 
 ### `wikidata_resolve_external_id` <sub>tool</sub>
 
-- Common use cases: CrossRef DOI → QID (P356), PubMed PMID → QID (P698), ORCID → author QID (P496), OpenAlex ID → entity QID (P10283), IMDb ID (P345)
-- Automatic value normalization: surrounding whitespace trimmed, resolver URL prefixes stripped (`https://doi.org/`, `https://pubmed.ncbi.nlm.nih.gov/`, `https://orcid.org/`), DOIs uppercased, PMID prefixes stripped, ORCID hyphens normalized
-- The property's data type must be `external-id` — item-valued or media properties (e.g. `P31`, `P18`) are rejected rather than returning an empty match
-- Returns `match=null` when not found (the Query Service lags the live wiki, so a null is not proof of absence)
-- The label comes in the requested `language`, falling back to the entity's multilingual (`mul`) label
-- Returns `multipleMatches` when a Wikidata data integrity issue causes more than one entity to claim the same external ID
-- Designed for cross-server joins with pubmed-mcp-server, crossref-mcp-server, and openalex-mcp-server
+- Resolves DOI (P356), PMID (P698), ORCID (P496), OpenAlex ID (P10283), IMDb ID (P345), and other external IDs to a QID; whitespace and resolver URL prefixes are stripped, and DOIs, PMIDs, and ORCIDs are normalized
+- The property must have data type `external-id`; item-valued or media properties (e.g. `P31`, `P18`) are rejected
+- Returns `match=null` when not found (the Query Service lags the live wiki, so null is not proof of absence) and `multipleMatches` when more than one entity claims the same ID; the label uses the requested `language`, falling back to `mul`
 
 ---
 
@@ -273,9 +253,9 @@ All configuration is validated at startup via Zod schemas. Key environment varia
 | `MCP_HTTP_ENDPOINT_PATH` | HTTP endpoint path where the MCP server is mounted | `/mcp` |
 | `MCP_PUBLIC_URL` | Public origin override for TLS-terminating reverse-proxy deployments | none |
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth` | `none` |
-| `MCP_SESSION_MODE` | HTTP session mode: `stateful`, `stateless`, or `auto`. The framework's `auto` default resolves to `stateful`; this server explicitly selects `stateless`. | `stateless` |
+| `MCP_SESSION_MODE` | HTTP session mode: `stateful`, `stateless`, or `auto` | `stateless` |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `notice`, `warning`, `error`) | `info` |
-| `MCP_GC_PRESSURE_INTERVAL_MS` | Opt-in Bun-only forced-GC interval (ms). Try `60000` if heap growth is observed under HTTP load. | `0` (disabled) |
+| `MCP_GC_PRESSURE_INTERVAL_MS` | Opt-in forced-GC interval in ms (Bun only) | `0` (disabled) |
 | `LOGS_DIR` | Directory for log files (Node.js only) | `<project-root>/logs` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
 | `WIKIDATA_USER_AGENT` | User-Agent string for Wikimedia requests (policy requires a descriptive value) | `wikidata-mcp-server/0.1 (https://github.com/cyanheads/wikidata-mcp-server)` |
