@@ -1,6 +1,6 @@
 # wikidata-mcp-server - Directory Structure
 
-Generated on: 2026-10-13 16:10:59
+Generated on: 2026-10-25 09:29:34
 
 ```text
 wikidata-mcp-server/
@@ -167,6 +167,7 @@ wikidata-mcp-server/
 │   ├── fixtures/
 │   │   └── wikibase-content-languages.json
 │   ├── helpers/
+│   │   ├── markdown.ts
 │   │   └── scan-cost.ts
 │   ├── prompts/
 │   ├── resources/
@@ -180,6 +181,7 @@ wikidata-mcp-server/
 │       ├── get-sitelinks.tool.test.ts
 │       ├── get-statements.tool.test.ts
 │       ├── language-code.test.ts
+│       ├── markdown-safety.test.ts
 │       ├── resolve-external-id.tool.test.ts
 │       ├── search-entities.tool.test.ts
 │       ├── sparql-query.tool.test.ts

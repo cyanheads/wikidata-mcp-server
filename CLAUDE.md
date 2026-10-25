@@ -2,10 +2,10 @@
 
 **Server:** @cyanheads/wikidata-mcp-server
 **Version:** 0.2.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.16`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
-**Zod:** ^4.6.5
+**Zod:** ^4.6.7
 
 **Domain:** Wikidata knowledge graph — entity search/fetch (REST API v1), SPARQL queries (Wikidata Query Service), batch label resolution (MediaWiki `wbgetentities`), and external ID lookup (DOI, PMID, ORCID, OpenAlex, IMDb).
 
