@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-10-25
+
+Preserve Wikidata text in Markdown output while keeping HTTP links clickable.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-10-13 · ⚠️ Breaking
 
 wikidata_get_statements groups references by source, resolves unit and nested labels, and types more values; wikidata_sparql_query accepts only SELECT and caps responses at 64,000 bytes; language inputs are validated; content[] now carries the full structuredContent data
