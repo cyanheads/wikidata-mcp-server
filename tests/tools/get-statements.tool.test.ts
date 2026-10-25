@@ -7,6 +7,7 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataGetStatements } from '@/mcp-server/tools/definitions/get-statements.tool.js';
+import { inlineText } from '../helpers/markdown.js';
 
 const mockFetchStatements = vi.fn();
 const mockFetchLabels = vi.fn();
@@ -851,12 +852,15 @@ describe('wikidataGetStatements', () => {
     };
     const lines = (wikidataGetStatements.format!(output)[0] as { text: string }).text.split('\n');
 
-    expect(lines).toContain('- +6378.137 [+6378.136, +6378.138] kilometre (Q828224)');
-    expect(lines).toContain('  - P2120: +6378.137 [+6378.136, +6378.138] (Q828224)');
-    expect(lines).toContain('      - P2120: +6378.137 [+6378.136, +6378.138] kilometre (Q828224)');
-    expect(lines).toContain('- +5 [+4, +6]');
-    expect(lines).toContain('- +6339.9 kilometre (Q828224)');
-    expect(lines).toContain('- +7 [?, +8]');
+    const displayed = lines.map(inlineText);
+    expect(displayed).toContain('- +6378.137 [+6378.136, +6378.138] kilometre (Q828224)');
+    expect(displayed).toContain('  - P2120: +6378.137 [+6378.136, +6378.138] (Q828224)');
+    expect(displayed).toContain(
+      '      - P2120: +6378.137 [+6378.136, +6378.138] kilometre (Q828224)',
+    );
+    expect(displayed).toContain('- +5 [+4, +6]');
+    expect(displayed).toContain('- +6339.9 kilometre (Q828224)');
+    expect(displayed).toContain('- +7 [?, +8]');
   });
 
   it('format: renders non-item entity-ID values as the bare ID at every level (#43)', () => {
@@ -980,7 +984,9 @@ describe('wikidataGetStatements', () => {
       unitLabel: 'kilometre',
     });
     const lines = (wikidataGetStatements.format!(result)[0] as { text: string }).text.split('\n');
-    expect(lines).toContain('- +6378.137 [+6378.136, +6378.138] kilometre (Q828224)');
+    expect(lines.map(inlineText)).toContain(
+      '- +6378.137 [+6378.136, +6378.138] kilometre (Q828224)',
+    );
   });
 
   it('format: renders no reference block for a statement without references', () => {

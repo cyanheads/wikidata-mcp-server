@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { DEFAULT_LANGUAGE, languageCode } from '@/mcp-server/tools/language-code.js';
 import { getWikidataRestService } from '@/services/wikidata/wikidata-rest-service.js';
 
@@ -114,6 +115,14 @@ export const wikidataSearchEntities = tool('wikidata_search_entities', {
     },
   ],
 
+  enrichmentTrailer: {
+    notice: {
+      render(value: string) {
+        return `> ${escapeMarkdownInline(value)}`;
+      },
+    },
+  },
+
   async handler(input, ctx) {
     const svc = getWikidataRestService();
     ctx.log.info('Searching Wikidata entities', {
@@ -169,9 +178,11 @@ export const wikidataSearchEntities = tool('wikidata_search_entities', {
 
     for (const item of result.results) {
       lines.push('');
-      lines.push(`## ${item.label || item.id}`);
+      lines.push(`## ${item.id}`);
+      lines.push(`**Label:** ${escapeMarkdownInline(item.label || item.id)}`);
       lines.push(`**ID:** ${item.id}`);
-      if (item.description) lines.push(`**Description:** ${item.description}`);
+      if (item.description)
+        lines.push(`**Description:** ${escapeMarkdownInline(item.description)}`);
       lines.push(`**Match:** ${item.match.type} (${item.match.language})`);
     }
 

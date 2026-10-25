@@ -5,6 +5,7 @@
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import MarkdownIt from 'markdown-it';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataEntityResource } from '@/mcp-server/resources/definitions/entity.resource.js';
 
@@ -61,6 +62,36 @@ const mockPropertyEntity = {
 describe('wikidataEntityResource', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('preserves upstream Markdown characters in labels, descriptions and links', async () => {
+    const text = 'A*p* `code` <b>tag</b> &copy; [link](javascript:alert)';
+    mockFetchEntity.mockResolvedValue({
+      id: 'Q1',
+      type: 'item',
+      labels: { en: text },
+      descriptions: { en: text },
+      sitelinks: { enwiki: { title: text, url: 'https://example.org/a_(b)' } },
+    });
+    const markdown = await wikidataEntityResource.handler(
+      { id: 'Q1' },
+      createMockContext({ uri: new URL('wikidata://entity/Q1') }),
+    );
+    const tokens = new MarkdownIt('commonmark')
+      .parse(String(markdown), {})
+      .flatMap((token) => token.children ?? []);
+    expect(
+      tokens
+        .filter((token) => token.type === 'text')
+        .map((token) => token.content)
+        .join(''),
+    ).toContain(text);
+    expect(
+      tokens.some((token) => token.type === 'html_inline' || token.type === 'code_inline'),
+    ).toBe(false);
+    expect(
+      tokens.filter((token) => token.type === 'link_open').map((token) => token.attrGet('href')),
+    ).toContain('https://example.org/a_(b)');
   });
 
   it('returns compact markdown for a valid Q-ID', async () => {
@@ -304,7 +335,7 @@ describe('wikidataEntityResource', () => {
     const result = (await wikidataEntityResource.handler({ id: 'Q76' }, ctx)) as string;
 
     expect(result).toContain('# Barack Obama (Q76)');
-    expect(result).toContain('*US president*');
+    expect(result).toContain('**Description:** US president');
   });
 
   it('prefers an exact en label over the mul fallback in the header', async () => {

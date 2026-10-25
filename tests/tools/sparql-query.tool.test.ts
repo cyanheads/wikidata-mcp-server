@@ -12,6 +12,7 @@ import {
   rowCharge,
   wikidataSparqlQuery,
 } from '@/mcp-server/tools/definitions/sparql-query.tool.js';
+import { inlineText } from '../helpers/markdown.js';
 import { expectBoundedScan } from '../helpers/scan-cost.js';
 
 const mockQuery = vi.fn();
@@ -578,6 +579,21 @@ describe('wikidataSparqlQuery', () => {
       expect(textOf(result)).toContain('**Rows returned:** 2');
     });
 
+    it('budgets escaped literals and URI link syntax against the actual text surface', async () => {
+      const bindings = Array.from({ length: 100 }, (_, i) => ({
+        uri: { type: 'uri', value: `https://example.org/${i}/${'a|b_(c)'.repeat(100)}` },
+        literal: { type: 'literal', value: '*[x] &copy; |'.repeat(100) },
+      }));
+      const result = await run(bindings, ['uri', 'literal']);
+      const structured = structuredOf(result);
+      expect(structured.returnedCount).toBeGreaterThan(0);
+      expect(structured.returnedCount).toBeLessThan(100);
+      expect(structured.results).toEqual(bindings.slice(0, structured.returnedCount));
+      expect(structured.notice).toContain('first');
+      expect(surfaceBytes(result).text).toBeLessThanOrEqual(64_000);
+      expect(surfaceBytes(result).structured).toBeLessThanOrEqual(64_000);
+    });
+
     it('returns every row when their charges land exactly on the budget', async () => {
       const allowance = rowAllowance(['item', 'label'], 40, false);
       const bindings = rowsCharging(40, allowance);
@@ -737,6 +753,16 @@ describe('wikidataSparqlQuery', () => {
       (wikidataSparqlQuery.format!({ results, variables, truncated: false })[0] as { text: string })
         .text;
 
+    it.each(['', '|tail'])(
+      'renders a long backslash run followed by %j within the bounded scan ceiling',
+      (suffix) => {
+        expectBoundedScan(
+          (size) => `https://example.org/?value=${'\\'.repeat(size)}${suffix}`,
+          (value) => render([{ uri: { type: 'uri', value } }], ['uri']),
+        );
+      },
+    );
+
     it('tells a URI from a literal and shows datatype or language', () => {
       const text = render(
         [
@@ -756,7 +782,7 @@ describe('wikidataSparqlQuery', () => {
         ['item', 'dob', 'label', 'id', 'site', 'node'],
       );
 
-      expect(tableRows(text)).toEqual([
+      expect(tableRows(text).map(inlineText)).toEqual([
         '| wd:Q42 | "1952-03-11T00:00:00Z"^^xsd:dateTime | "Douglas Adams"@en | "wd:Q42" | <https://en.wikipedia.org/wiki/Douglas_Adams> | _:t123 |',
       ]);
     });
@@ -769,9 +795,9 @@ describe('wikidataSparqlQuery', () => {
       ];
       const text = render(results, ['note']);
 
-      expect(tableRows(text)).toEqual([
-        '| "a \\| b\\r\\nc\\nd \\"q\\" \\\\" |',
-        '| <http://example.org/x\\|y> |',
+      expect(tableRows(text).map(inlineText)).toEqual([
+        '| "a | b\\r\\nc\\nd \\"q\\" \\\\" |',
+        '| <http://example.org/x|y> |',
       ]);
       expect(text.split('\n')).toHaveLength(2 + 2 + results.length);
     });

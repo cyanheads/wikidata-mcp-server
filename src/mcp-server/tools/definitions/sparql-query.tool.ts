@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
 import { DEFAULT_LANGUAGE, languageFallbackList } from '@/mcp-server/tools/language-code.js';
 import { utf8Bytes } from '@/mcp-server/tools/utf8-bytes.js';
 import { getWikidataSparqlService } from '@/services/wikidata/wikidata-sparql-service.js';
@@ -120,6 +121,15 @@ function renderCell(binding: SparqlBinding | undefined): string {
   let cell: string;
   if (binding.type === 'uri') {
     cell = compactIri(value);
+    const protocol = URL.parse(value)?.protocol;
+    if (
+      cell.startsWith('<') &&
+      (protocol === 'http:' || protocol === 'https:') &&
+      !/[\r\n]/.test(value)
+    ) {
+      // GFM splits table cells before parsing links, including pipes inside destinations.
+      return markdownLink(cell, value.replaceAll('|', '%7C'));
+    }
   } else if (binding.type === 'bnode') {
     cell = `_:${value}`;
   } else {
@@ -131,19 +141,19 @@ function renderCell(binding: SparqlBinding | undefined): string {
         ? `${quoted}^^${compactIri(binding.datatype)}`
         : quoted;
   }
-  return cell.replaceAll('|', '\\|').replaceAll('\r', '\\r').replaceAll('\n', '\\n');
+  return escapeMarkdownInline(cell.replaceAll('\r', '\\r').replaceAll('\n', '\\n'));
 }
 
 const renderRow = (row: SparqlRow, variables: string[]): string =>
   `| ${variables.map((v) => renderCell(row[v])).join(' | ')} |`;
 
 const tableHeader = (variables: string[]): string[] => [
-  `| ${variables.join(' | ')} |`,
+  `| ${variables.map(escapeMarkdownInline).join(' | ')} |`,
   `| ${variables.map(() => '---').join(' | ')} |`,
 ];
 
 const headerLine = (variables: string[], truncated: boolean): string =>
-  `**Variables:** ${variables.join(', ')} | **Truncated at the 10,000-row server cap:** ${truncated}`;
+  `**Variables:** ${variables.map(escapeMarkdownInline).join(', ')} | **Truncated at the 10,000-row server cap:** ${truncated}`;
 
 /**
  * Bytes one row costs on the larger of the two surfaces: its serialized binding plus the comma
@@ -214,7 +224,7 @@ export function rowAllowance(variables: string[], total: number, truncated: bool
       '',
       `**${total} total**`,
       `**Rows returned:** ${total}`,
-      `> ${notice}`,
+      `> ${escapeMarkdownInline(notice)}`,
     ].join('\n'),
   );
   return RESPONSE_BUDGET_BYTES - Math.max(structured, text);
@@ -328,6 +338,11 @@ export const wikidataSparqlQuery = tool('wikidata_sparql_query', {
   },
   enrichmentTrailer: {
     returnedCount: { label: 'Rows returned' },
+    notice: {
+      render(value: string) {
+        return `> ${escapeMarkdownInline(value)}`;
+      },
+    },
   },
 
   errors: [

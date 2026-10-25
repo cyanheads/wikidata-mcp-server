@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { DEFAULT_LANGUAGE, languageCodes } from '@/mcp-server/tools/language-code.js';
 import { getWikidataRestService, normalizeId } from '@/services/wikidata/wikidata-rest-service.js';
 
@@ -114,14 +115,14 @@ export const wikidataGetLabels = tool('wikidata_get_labels', {
       const primaryLabel = primaryLanguage ? data.labels[primaryLanguage] : undefined;
       const primaryDescription = primaryLanguage ? data.descriptions[primaryLanguage] : undefined;
       lines.push(
-        `**${id}:** ${primaryLabel ?? id}${primaryDescription ? ` — ${primaryDescription}` : ''}`,
+        `**${id}:** ${escapeMarkdownInline(primaryLabel ?? id)}${primaryDescription ? ` — ${escapeMarkdownInline(primaryDescription)}` : ''}`,
       );
       // Every other returned language, one line each — the same entries structuredContent carries.
       for (const lang of availableLanguages) {
         if (lang === primaryLanguage) continue;
         const description = data.descriptions[lang];
         lines.push(
-          `  ${lang}: ${data.labels[lang] ?? id}${description ? ` — ${description}` : ''}`,
+          `  ${lang}: ${escapeMarkdownInline(data.labels[lang] ?? id)}${description ? ` — ${escapeMarkdownInline(description)}` : ''}`,
         );
       }
     }

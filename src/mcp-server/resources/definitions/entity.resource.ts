@@ -5,6 +5,7 @@
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
 import {
   getWikidataRestService,
   isEntityNotFoundError,
@@ -53,11 +54,13 @@ export const wikidataEntityResource = resource('wikidata://entity/{id}', {
     // Header: ID + English label, falling back to the entity's multilingual ("mul") label —
     // items like Q76 carry only a mul label and would otherwise render as a bare QID.
     const enLabel = resolveLangValue(entity.labels, 'en');
-    lines.push(`# ${enLabel ? `${enLabel} (${id})` : id}`);
+    const multilineLabel = enLabel !== undefined && /[\r\n]/.test(enLabel);
+    lines.push(`# ${enLabel && !multilineLabel ? `${escapeMarkdownInline(enLabel)} (${id})` : id}`);
+    if (multilineLabel) lines.push(`**Label:** ${escapeMarkdownInline(enLabel)}`);
 
     // English description
     const enDesc = resolveLangValue(entity.descriptions, 'en');
-    if (enDesc) lines.push(`*${enDesc}*`);
+    if (enDesc) lines.push(`**Description:** ${escapeMarkdownInline(enDesc)}`);
 
     lines.push('');
 
@@ -84,9 +87,9 @@ export const wikidataEntityResource = resource('wikidata://entity/{id}', {
     // Wikipedia link (enwiki sitelink)
     const enwiki = entity.sitelinks?.enwiki;
     if (enwiki?.url) {
-      lines.push(`**Wikipedia:** [${enwiki.title}](${enwiki.url})`);
+      lines.push(`**Wikipedia:** ${markdownLink(enwiki.title, enwiki.url)}`);
     } else if (enwiki?.title) {
-      lines.push(`**Wikipedia:** ${enwiki.title}`);
+      lines.push(`**Wikipedia:** ${escapeMarkdownInline(enwiki.title)}`);
     }
 
     // Image (P18)
@@ -95,7 +98,7 @@ export const wikidataEntityResource = resource('wikidata://entity/{id}', {
       const firstImage = images[0];
       const imgContent = firstImage?.value?.content;
       if (typeof imgContent === 'string' && imgContent) {
-        lines.push(`**Image:** ${imgContent}`);
+        lines.push(`**Image:** ${escapeMarkdownInline(imgContent)}`);
       }
     }
 
@@ -106,7 +109,7 @@ export const wikidataEntityResource = resource('wikidata://entity/{id}', {
       lines.push(`**Labels available:** ${labelCount} languages`);
       const sample = Object.entries(entity.labels ?? {})
         .slice(0, 5)
-        .map(([lang, lb]) => `${lang}: ${lb}`)
+        .map(([lang, lb]) => `${lang}: ${escapeMarkdownInline(lb)}`)
         .join(' | ');
       if (sample) lines.push(sample);
     }

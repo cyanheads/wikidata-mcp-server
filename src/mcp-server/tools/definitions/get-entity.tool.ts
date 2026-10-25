@@ -7,7 +7,9 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   DEFAULT_OUTLINE_BUDGET_BYTES,
+  escapeMarkdownInline,
   formatOutline,
+  markdownLink,
   OUTLINE_VARIANT,
   type SectionMeta,
 } from '@cyanheads/mcp-ts-core/utils';
@@ -414,21 +416,25 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
     // Every entry of every returned category — the same entries structuredContent carries.
     if (result.labels) {
       const labels = Object.entries(result.labels);
-      lines.push(`**Label:** ${result.labels.en ?? labels[0]?.[1] ?? '(none)'}`);
+      lines.push(
+        `**Label:** ${escapeMarkdownInline(result.labels.en ?? labels[0]?.[1] ?? '(none)')}`,
+      );
       lines.push(`**Labels (${labels.length}):**`);
-      for (const [lang, label] of labels) lines.push(`- ${lang}: ${label}`);
+      for (const [lang, label] of labels) lines.push(`- ${lang}: ${escapeMarkdownInline(label)}`);
     }
 
     if (result.descriptions) {
       const descriptions = Object.entries(result.descriptions);
-      if (result.descriptions.en) lines.push(`**Description:** ${result.descriptions.en}`);
+      if (result.descriptions.en)
+        lines.push(`**Description:** ${escapeMarkdownInline(result.descriptions.en)}`);
       lines.push(`**Descriptions (${descriptions.length}):**`);
-      for (const [lang, description] of descriptions) lines.push(`- ${lang}: ${description}`);
+      for (const [lang, description] of descriptions)
+        lines.push(`- ${lang}: ${escapeMarkdownInline(description)}`);
     }
 
     if (result.aliases) {
       const aliases = Object.entries(result.aliases).flatMap(([lang, list]) =>
-        list.map((alias) => `- ${lang}: ${alias}`),
+        list.map((alias) => `- ${lang}: ${escapeMarkdownInline(alias)}`),
       );
       lines.push(`**Aliases (${aliases.length}):**`, ...aliases);
     }
@@ -453,7 +459,9 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       >;
       lines.push('', `**Sitelinks (${sitelinks.length}):**`);
       for (const [site, sl] of sitelinks) {
-        const title = sl.url ? `[${sl.title}](${sl.url})` : sl.title;
+        const title = sl.url
+          ? markdownLink(sl.title ?? '', sl.url)
+          : escapeMarkdownInline(sl.title ?? '');
         lines.push(`- ${site}: ${title}${sl.badges?.length ? ` [${sl.badges.join(', ')}]` : ''}`);
       }
     }

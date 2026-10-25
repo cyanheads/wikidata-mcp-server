@@ -4,6 +4,7 @@
  * @module mcp-server/tools/statement-format
  */
 
+import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
 import type { NormalizedStatement } from '@/services/wikidata/types.js';
 import { unitQid } from '@/services/wikidata/wikidata-rest-service.js';
 
@@ -26,8 +27,8 @@ const TIME_PRECISION: Record<number, string> = {
   14: 'second',
 };
 
-/** One statement value as inline markdown. */
-function formatStatementValue(value: NormalizedStatement['value']): string {
+/** The complete human-readable representation, before Markdown encoding. */
+function statementValueText(value: NormalizedStatement['value']): string {
   switch (value.type) {
     case 'wikibase-item':
       return value.label ? `${value.label} (${value.qid})` : value.qid;
@@ -65,6 +66,13 @@ function formatStatementValue(value: NormalizedStatement['value']): string {
     default:
       return '(unknown)';
   }
+}
+
+/** One statement value as literal text or a safe URL link. */
+function formatStatementValue(value: NormalizedStatement['value']): string {
+  return value.type === 'url'
+    ? markdownLink(value.value, value.value)
+    : escapeMarkdownInline(statementValueText(value));
 }
 
 /**

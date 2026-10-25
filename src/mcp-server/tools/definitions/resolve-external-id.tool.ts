@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
 import { DEFAULT_LANGUAGE, languageCode } from '@/mcp-server/tools/language-code.js';
 import {
   getWikidataRestService,
@@ -285,16 +286,18 @@ LIMIT 5`;
 
   format: (result) => {
     const lines: string[] = [
-      `**Property:** ${result.property} | **Value searched:** ${result.value}`,
+      `**Property:** ${result.property} | **Value searched:** ${escapeMarkdownInline(result.value)}`,
     ];
 
     if (result.match !== null) {
-      lines.push(`**Match:** ${result.match.label || result.match.id}`);
+      lines.push(`**Match:** ${escapeMarkdownInline(result.match.label || result.match.id)}`);
       lines.push('');
-      lines.push(`## ${result.match.label || result.match.id}`);
+      const label = result.match.label || result.match.id;
+      lines.push(`## ${/[\r\n]/.test(label) ? result.match.id : escapeMarkdownInline(label)}`);
       lines.push(`**QID:** ${result.match.id}`);
-      if (result.match.description) lines.push(`**Description:** ${result.match.description}`);
-      lines.push(`**URL:** ${result.match.url}`);
+      if (result.match.description)
+        lines.push(`**Description:** ${escapeMarkdownInline(result.match.description)}`);
+      lines.push(`**URL:** ${markdownLink(result.match.url, result.match.url)}`);
     } else if (result.multipleMatches?.length) {
       lines.push(
         `**Match:** multiple (${result.multipleMatches.length}) — Wikidata data integrity issue`,
@@ -303,7 +306,7 @@ LIMIT 5`;
         '\n**Multiple entities claim this external ID — select the correct QID manually:**',
       );
       for (const entry of result.multipleMatches) {
-        lines.push(`- ${entry.id}: ${entry.label || '(no label)'}`);
+        lines.push(`- ${entry.id}: ${escapeMarkdownInline(entry.label || '(no label)')}`);
       }
     } else {
       lines.push('**Match:** none');
@@ -315,7 +318,7 @@ LIMIT 5`;
     if (result.match !== null && result.multipleMatches?.length) {
       lines.push('\n**Also matched:**');
       for (const entry of result.multipleMatches) {
-        lines.push(`- ${entry.id}: ${entry.label || '(no label)'}`);
+        lines.push(`- ${entry.id}: ${escapeMarkdownInline(entry.label || '(no label)')}`);
       }
     }
 

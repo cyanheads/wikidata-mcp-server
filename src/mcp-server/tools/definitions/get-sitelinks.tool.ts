@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
 import {
   getWikidataRestService,
   isEntityNotFoundError,
@@ -146,7 +147,7 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
     const lines: string[] = [`## Sitelinks for ${result.id}`, `**Count:** ${result.count}`];
 
     if (result.message) {
-      lines.push(`\n> ${result.message}`);
+      lines.push(`\n> ${escapeMarkdownInline(result.message)}`);
     }
 
     // Sort: Wikipedia editions first, then others
@@ -160,7 +161,7 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
         sl.url ??
         `https://${code.replace('wiki', '')}.wikipedia.org/wiki/${encodeURIComponent(sl.title)}`;
       lines.push(
-        `**${code}:** [${sl.title}](${url})${sl.badges?.length ? ` [${sl.badges.join(', ')}]` : ''}`,
+        `**${code}:** ${markdownLink(sl.title, url)}${sl.badges?.length ? ` [${sl.badges.join(', ')}]` : ''}`,
       );
     }
 

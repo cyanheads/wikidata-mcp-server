@@ -7,6 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataGetLabels } from '@/mcp-server/tools/definitions/get-labels.tool.js';
+import { inlineText } from '../helpers/markdown.js';
 
 const mockFetchLabels = vi.fn();
 
@@ -144,8 +145,8 @@ describe('wikidataGetLabels', () => {
     });
     const text = (blocks[0] as { text: string }).text;
 
-    expect(text).toContain('de: Barack Obama — 44. Präsident der Vereinigten Staaten');
-    expect(text).toContain('de: ist ein(e) — Klasse, zu der dieses Objekt gehört');
+    expect(inlineText(text)).toContain('de: Barack Obama — 44. Präsident der Vereinigten Staaten');
+    expect(inlineText(text)).toContain('de: ist ein(e) — Klasse, zu der dieses Objekt gehört');
   });
 
   /**
