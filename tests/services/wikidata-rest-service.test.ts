@@ -401,7 +401,28 @@ describe('WikidataRestService', () => {
       });
 
       it("one call's cancellation mid-flight never fails another call's batches", async () => {
-        const stats = trackShared();
+        const firstWave = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        const stats = { inFlight: 0, peak: 0, startedIds: [] as string[] };
+        mockFetch.mockImplementation(async (url: unknown, init?: { signal?: AbortSignal }) => {
+          stats.startedIds.push(...idsOf(url));
+          stats.inFlight++;
+          stats.peak = Math.max(stats.peak, stats.inFlight);
+          if (stats.inFlight === 4) firstWave.resolve();
+          try {
+            await new Promise<void>((resolve, reject) => {
+              init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+                once: true,
+              });
+              release.promise.then(resolve, reject);
+            });
+          } finally {
+            stats.inFlight--;
+          }
+          return jsonResponse({
+            entities: Object.fromEntries(idsOf(url).map((id) => [id, { id }])),
+          });
+        });
         const svc = makeService();
         const controller = new AbortController();
 
@@ -409,14 +430,15 @@ describe('WikidataRestService', () => {
           .fetchLabels(ids(1, 400), ['en'], createMockContext({ signal: controller.signal }))
           .then(
             () => 'resolved',
-            () => 'rejected',
+            (error: unknown) => error,
           );
         const bystander = svc.fetchLabels(ids(7001, 100), ['en'], createMockContext());
         // Abort once the first wave is in flight: 4 of the doomed call's 8 batches.
-        await new Promise((resolve) => setTimeout(resolve, 1));
+        await firstWave.promise;
         controller.abort();
+        release.resolve();
 
-        expect(await doomed).toBe('rejected');
+        expect(await doomed).toBe(controller.signal.reason);
         const result = await bystander;
         expect(Object.keys(result)).toHaveLength(100);
         // The doomed call's queued batches (Q201..Q400) never started.
