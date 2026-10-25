@@ -2,6 +2,8 @@
 .mcpregistry_*
 /.claude/
 /.agents/
+/.github/
+/.vscode/
 /framework-skills/
 /src/
 /scripts/
