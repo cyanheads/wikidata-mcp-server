@@ -67,7 +67,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
     '(the retrieval_notice names one such set). Labels are added after that check, so a returned set can run past 24,000 bytes by their size, ' +
     'and a property requested alone is always returned whole — on a major item one property can run to hundreds of kilobytes. ' +
     'Designed for fact verification: "what does Wikidata say about this entity\'s {property}?". ' +
-    'Preferred-rank statements are the most current values.',
+    'Preferred rank marks the favored statements for a property; check qualifiers and references for temporal scope and evidence.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
