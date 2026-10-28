@@ -1,6 +1,6 @@
 # wikidata-mcp-server - Directory Structure
 
-Generated on: 2026-10-25 09:29:34
+Generated on: 2026-10-28 12:02:06
 
 ```text
 wikidata-mcp-server/
@@ -38,6 +38,8 @@ wikidata-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -136,6 +138,11 @@ wikidata-mcp-server/
 │   ├── release-github.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
+├── skills/
+│   └── wikidata-guide/
+│       ├── references/
+│       │   └── sparql-patterns.md
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -172,6 +179,8 @@ wikidata-mcp-server/
 │   ├── prompts/
 │   ├── resources/
 │   │   └── entity.resource.test.ts
+│   ├── scripts/
+│   │   └── agent-doc-entries.test.ts
 │   ├── services/
 │   │   ├── wikidata-rest-service.test.ts
 │   │   └── wikidata-sparql-service.test.ts
@@ -202,7 +211,9 @@ wikidata-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json
