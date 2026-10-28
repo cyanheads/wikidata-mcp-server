@@ -19,6 +19,7 @@ import { initWikidataSparqlService } from './services/wikidata/wikidata-sparql-s
 await createApp({
   name: 'wikidata-mcp-server',
   title: 'wikidata-mcp-server',
+  skills: 'skills',
   instructions:
     'Use the wikidata_* tools to query the Wikidata knowledge graph (REST API + Query Service). No API key required. ' +
     'Items are addressed by Q-IDs (e.g. Q76), properties by P-IDs (e.g. P31). IDs are not names — resolve a name to an ID with ' +
