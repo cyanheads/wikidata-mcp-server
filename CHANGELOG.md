@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-10-28
+
+Publish a Wikidata research skill for entity disambiguation, claim evidence, and SPARQL, with framework 0.13.18 and updated plugin and bundle packaging.
+
 ## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-10-25
 
 Preserve Wikidata text in Markdown output while keeping HTTP links clickable.

@@ -1,6 +1,6 @@
 # wikidata-mcp-server - Directory Structure
 
-Generated on: 2026-10-28 12:02:06
+Generated on: 2026-10-28 12:20:02
 
 ```text
 wikidata-mcp-server/
@@ -26,6 +26,7 @@ wikidata-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
