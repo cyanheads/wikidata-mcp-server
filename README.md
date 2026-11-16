@@ -37,8 +37,8 @@ Wikidata's knowledge graph. Search and fetch entities, traverse the graph with S
 |:---|:---|
 | `wikidata_search_entities` | Search for items or properties by text query, returning QIDs/PIDs with labels, descriptions, and match metadata |
 | `wikidata_get_entity` | Fetch a full entity by QID or PID with optional field and language filtering |
-| `wikidata_get_labels` | Batch-resolve up to 50 QIDs or PIDs to human-readable labels and descriptions |
-| `wikidata_get_statements` | Fetch property claims for an entity with qualifier detail and QID label resolution |
+| `wikidata_get_labels` | Batch-resolve up to 500 QIDs or PIDs per call to human-readable labels and descriptions |
+| `wikidata_get_statements` | Fetch property claims for an entity with qualifier detail, per-property paging, a best-rank filter, and QID and PID label resolution |
 | `wikidata_get_sitelinks` | Fetch Wikipedia and Wikimedia project article URLs for a Wikidata item |
 | `wikidata_sparql_query` | Execute a SPARQL SELECT query against the Wikidata Query Service |
 | `wikidata_resolve_external_id` | Look up a Wikidata entity by an external identifier (DOI, PubMed ID, ORCID, OpenAlex ID, etc.) |
@@ -47,7 +47,7 @@ Wikidata's knowledge graph. Search and fetch entities, traverse the graph with S
 
 | Resource | Description |
 |:---|:---|
-| `wikidata://entity/{id}` | Compact markdown summary of a Wikidata entity — labels, English description, instance-of, Wikipedia link, image, and statement count |
+| `wikidata://entity/{id}` | Compact markdown summary of a Wikidata entity — labels, English description, instance-of, Wikipedia link, image, and the number of properties with statements |
 
 All resource data is also reachable via tools.
 
@@ -58,14 +58,16 @@ The published [wikidata-guide](./skills/wikidata-guide/SKILL.md) covers entity d
 ### `wikidata_search_entities` <sub>tool</sub>
 
 - Searches labels, aliases, and descriptions; `type="item"` for people, places, and works, `type="property"` for P-IDs
-- Takes a Wikidata language code (`en`, `de`, `pt-br`; case-insensitive); offset pagination, up to 50 results per call
+- Takes a Wikidata language code (`en`, `de`, `pt-br`; case-insensitive); `limit` defaults to 10 and serves up to 500 per page
+- The endpoint returns no total: page by sending each page's `nextOffset` as `offset` (0–9,999) until a page returns no results or no `nextOffset`; only the first 10,000 results are reachable
 - Each hit includes match metadata saying whether it matched a label or alias
 
 ---
 
 ### `wikidata_get_entity` <sub>tool</sub>
 
-- Q-IDs (e.g. `Q76`) fetch items and P-IDs (e.g. `P31`) fetch properties; `fields` selects `labels`, `descriptions`, `aliases`, `statements`, or `sitelinks`, and narrows the upstream fetch (Q76 is 344,114 bytes whole, 6,703 for `labels` alone)
+- Q-IDs (e.g. `Q76`) fetch items and P-IDs (e.g. `P31`) fetch properties; `fields` selects `labels`, `descriptions`, `aliases`, `statements`, or `sitelinks`, and narrows the upstream fetch
+- `id` may be bare, an entity URI (`http://www.wikidata.org/entity/Q76`), or `wd:Q76`, as on `wikidata_get_labels`, `wikidata_get_statements`, and `wikidata_get_sitelinks`
 - `languages` filters multilingual maps to the given language codes
 - An entity too large to inline returns an outline of field categories with byte sizes; its `retrieval_notice` names a `fields` set that fits and points oversized statements or sitelinks to the tool that can narrow them
 
@@ -73,24 +75,27 @@ The published [wikidata-guide](./skills/wikidata-guide/SKILL.md) covers entity d
 
 ### `wikidata_get_labels` <sub>tool</sub>
 
-- Up to 50 IDs per call via the MediaWiki `wbgetentities` API, with one or more language codes per request
-- Reports a `found` count and `notFound` IDs for partial results
+- Up to 500 distinct IDs per call via the MediaWiki `wbgetentities` API (batched 50 at a time), with up to 50 language codes per request; `ids` takes up to 10,000 entries, and distinct IDs past the first 500 come back in `deferredIds` to send in a follow-up call
+- IDs may be bare (`Q76`), entity URIs (`http://www.wikidata.org/entity/Q76`), or `wd:Q76`, the forms SPARQL results carry
+- Reports a `found` count and `notFound` IDs for partial results; malformed entries come back in `invalid` and fail the call (`invalid_ids`) only when no valid ID remains
 - Meant to follow a SPARQL query: run it, then humanize the QIDs
 
 ---
 
 ### `wikidata_get_statements` <sub>tool</sub>
 
-- `properties` limits the fetch to specific P-IDs (omit for all); item QIDs and quantity units in values, qualifiers, and references are resolved to labels unless `resolve_labels=false`
+- `properties` limits the fetch to specific P-IDs (omit for all); item QIDs and quantity units in values, qualifiers, and references are resolved to labels unless `resolve_labels=false`, and every P-ID the statements name is labelled in `propertyLabels`
+- `rank="best"` keeps each property's preferred statements, or its normal ones when none is preferred, and never deprecated ones: the statements SPARQL's truthy `wdt:` reads (default `"all"`)
+- Each property returns up to `limit` statements (default 10, at most 500) from `offset`, in upstream order; `propertyTotals` counts every statement a property holds, and `nextOffset`, present while any property holds more, continues every property at once
 - References stay grouped by source; unknown or absent values come back as `somevalue` / `novalue`
-- A statement set too large to inline returns an outline of P-IDs with byte sizes, largest first (unfiltered, Q30 carries 467 properties across 1,717 statements); re-call with `properties` whose sizes sum to 24,000 or less, as the `retrieval_notice` suggests
+- A page of several properties too large to inline returns an outline of P-IDs with byte sizes, largest first (as of 2026-11-15, unfiltered Q30 carries 475 properties across 1,766 statements); re-call with the same `limit`, `offset`, and `rank` plus `properties` whose sizes sum to 24,000 or less, as the `retrieval_notice` suggests. A single property is never outlined: it returns its window
 
 ---
 
 ### `wikidata_get_sitelinks` <sub>tool</sub>
 
 - Maps site codes (e.g. `enwiki`) to article titles and URLs; `sites` filters to specific codes
-- `wikis_only=true` keeps only Wikipedia links (drops Wiktionary, Wikiquote, Wikisource, etc.)
+- `wikis_only=true` keeps only Wikipedia editions, those whose URL is on a `<subdomain>.wikipedia.org` host (drops Commons, Wikispecies, Wikidata, Wiktionary, Wikiquote, Wikisource, and every other project)
 - Q-IDs only; P-IDs are not supported
 
 ---
@@ -99,22 +104,25 @@ The published [wikidata-guide](./skills/wikidata-guide/SKILL.md) covers entity d
 
 - Runs SELECT queries against the Wikidata Query Service (Blazegraph); ASK, CONSTRUCT, DESCRIBE, updates, and plain search text are rejected before the request is sent
 - Standard prefixes (`wd:`, `wdt:`, `p:`, `ps:`, `pq:`, `wikibase:`, `bd:`) and the `wikibase:label` SERVICE (when the query uses a `?<var>Label`, `?<var>Description`, or `?<var>AltLabel` variable) are added automatically; `language` takes one code or a fallback list like `fr,en`
-- Results are SPARQL 1.1 JSON bindings, capped at 64,000 bytes per response and cut between whole rows; a larger result returns its leading rows with `returnedCount`, `totalCount`, and a notice to page with `ORDER BY` plus `LIMIT`/`OFFSET` or to aggregate
-- Client `timeout` is 1–55s (server hard limit 60s); rate limit is 60 requests/min and 5 concurrent requests per IP
+- Scholarly articles and their triples (DOI, PMID, authorship) live in a separate graph, reachable only inside `SERVICE wdsubgraph:scholarly_articles { … }` (`wdsubgraph:` is predeclared); read an article's label inside that block with `BIND(?paperLabel AS ?paperLabel)` and a label SERVICE there
+- Results are SPARQL 1.1 JSON bindings, at most 4,000 rows per call; a larger result returns its first 4,000 with `truncated`, `shown`, `cap`, and a notice to narrow the `WHERE` clause or aggregate, or, for a result not much larger, to page with `ORDER BY` plus `LIMIT`/`OFFSET` (`totalCount` appears only when the whole result was read). A result body past 8 MiB fails as `result_too_large`
+- Client `timeout` is 1–55s (server hard limit 60s); the Query Service allows each client (user agent and IP) 60 seconds of query processing time per 60 seconds and each IP at most 5 parallel queries
 
 ---
 
 ### `wikidata_resolve_external_id` <sub>tool</sub>
 
-- Resolves DOI (P356), PMID (P698), ORCID (P496), OpenAlex ID (P10283), IMDb ID (P345), and other external IDs to a QID; whitespace and resolver URL prefixes are stripped, and DOIs, PMIDs, and ORCIDs are normalized
+- Resolves DOI (P356), PMID (P698), ORCID (P496), OpenAlex ID (P10283), IMDb ID (P345), and other external IDs to a QID; whitespace and resolver URL prefixes are stripped, and DOIs, PMIDs, ORCIDs, OpenAlex IDs, and IMDb IDs are normalized to their stored form
 - The property must have data type `external-id`; item-valued or media properties (e.g. `P31`, `P18`) are rejected
-- Returns `match=null` when not found (the Query Service lags the live wiki, so null is not proof of absence) and `multipleMatches` when more than one entity claims the same ID; the label uses the requested `language`, falling back to `mul`
+- Searches the main graph and the scholarly-article graph (where scholarly articles and their DOIs and PMIDs live) in parallel; a graph that does not answer is named in `unavailableGraphs`, and the result covers the other
+- Matches through statements of every rank, entities holding the ID at best rank first, then another non-deprecated rank, then deprecated; `match.rank` reports the statement's rank (`deprecated` usually means a retired or mistaken ID)
+- Returns `match=null` when not found (the Query Service lags the live wiki, so null is not proof of absence) and `multipleMatches` (at most 5) when more than one entity claims the same ID; the label uses the requested `language`, falling back to `mul`
 
 ---
 
 ### `wikidata://entity/{id}` <sub>resource</sub>
 
-- Compact markdown summary — labels (all languages), English description, instance-of (`P31`), enwiki Wikipedia link, image (`P18`), and statement count
+- Compact markdown summary — English label and description, the number of label languages with a sample of five, instance-of (`P31`), enwiki Wikipedia link, image (`P18`), and the number of properties with statements
 - Returned as `text/markdown`; for full entity data, use `wikidata_get_entity`
 - `id` is a Q-ID or P-ID, the same identifiers the tools take
 
@@ -127,6 +135,7 @@ Wikidata-specific:
 - Wikidata REST API v1 for entity and statement fetches — no SPARQL overhead for lookup operations
 - MediaWiki `wbgetentities` API for efficient batch label resolution
 - Wikidata Query Service (Blazegraph) for SPARQL with auto-injected prefix headers and label SERVICE
+- A count input above its per-call cap is served at the cap with a notice; `WIKIDATA_CLAMP_LIMITS=false` rejects it instead
 - Configurable `User-Agent` per Wikimedia policy (`WIKIDATA_USER_AGENT`)
 - Separate timeout configuration for REST and SPARQL endpoints (`WIKIDATA_REST_TIMEOUT_MS`, `WIKIDATA_SPARQL_TIMEOUT_MS`)
 
@@ -183,8 +192,9 @@ All configuration is validated at startup via Zod schemas. Key environment varia
 | `LOGS_DIR` | Directory for log files (Node.js only) | `<project-root>/logs` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
 | `WIKIDATA_USER_AGENT` | User-Agent string for Wikimedia requests (policy requires a descriptive value) | `wikidata-mcp-server/0.1 (https://github.com/cyanheads/wikidata-mcp-server)` |
-| `WIKIDATA_SPARQL_TIMEOUT_MS` | Max wait for a SPARQL response in ms | `55000` |
+| `WIKIDATA_SPARQL_TIMEOUT_MS` | Max wait for a SPARQL response in ms, retries included; caps every call's `timeout` (at most 55000) | `55000` |
 | `WIKIDATA_REST_TIMEOUT_MS` | Max wait for REST API responses in ms | `10000` |
+| `WIKIDATA_CLAMP_LIMITS` | Serve a count above its per-call cap at the cap, with a notice; `false` rejects it instead | `true` |
 | `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
@@ -193,7 +203,7 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
-Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js ≥24.0.0).
+Requires [Bun v1.4.4](https://bun.sh/) or higher (or Node.js ≥24.0.0).
 
 ```sh
 git clone https://github.com/cyanheads/wikidata-mcp-server.git

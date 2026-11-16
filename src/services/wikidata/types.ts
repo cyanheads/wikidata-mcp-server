@@ -147,7 +147,7 @@ export type EntityIdKind = 'property' | 'lexeme' | 'form' | 'sense' | 'entity-sc
 /** Normalized statement value. */
 export type StatementValue =
   | { type: 'wikibase-item'; qid: string; label?: string | undefined }
-  /** A property, lexeme, form, sense, or entity-schema reference (`P279`, `L37633-F1`, `E10`) — never labelled. */
+  /** A property, lexeme, form, sense, or entity-schema reference (`P279`, `L37633-F1`, `E10`). The value carries no label; a property's label is reported beside it in `propertyLabels`. */
   | { type: 'entity-id'; entityType: EntityIdKind; id: string }
   | { type: 'time'; time: string; precision: number }
   | {

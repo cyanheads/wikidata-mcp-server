@@ -3,6 +3,7 @@
  * @module tests/tools/get-statements.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -76,6 +77,17 @@ const rawStatementsFor = (count: number) =>
       ],
     ]),
   );
+
+type StatementsOutput = Parameters<NonNullable<typeof wikidataGetStatements.format>>[0];
+
+/**
+ * Formats a fixture that tests statement rendering alone, filling the per-call pipeline fields
+ * (rank, totals, the page count) it does not exercise.
+ */
+const formatFixture = (
+  output: Omit<StatementsOutput, 'rank' | 'propertyTotals' | 'returnedCount'>,
+) =>
+  wikidataGetStatements.format!({ rank: 'all', propertyTotals: {}, returnedCount: 0, ...output });
 
 /** Normalizes each property to a statement of `valueBytes` — the size lever for overflow tests. */
 const bulkyNormalize = (valueBytes: number) => (propertyId: string) => [
@@ -258,7 +270,7 @@ describe('wikidataGetStatements', () => {
       statementCount: 1,
       labelsResolved: true,
     };
-    const blocks = wikidataGetStatements.format!(output);
+    const blocks = formatFixture(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('Q76');
     expect(text).toContain('P31');
@@ -302,7 +314,7 @@ describe('wikidataGetStatements', () => {
       statementCount: 1,
       labelsResolved: false,
     };
-    const blocks = wikidataGetStatements.format!(output);
+    const blocks = formatFixture(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('★');
     expect(text).toContain('+1961-08-04T00:00:00Z');
@@ -326,7 +338,7 @@ describe('wikidataGetStatements', () => {
       statementCount: 1,
       labelsResolved: false,
     };
-    const blocks = wikidataGetStatements.format!(output);
+    const blocks = formatFixture(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('deprecated');
   });
@@ -383,7 +395,7 @@ describe('wikidataGetStatements', () => {
       statementCount: 1,
       labelsResolved: false,
     };
-    const text = (wikidataGetStatements.format!(output)[0] as { text: string }).text;
+    const text = (formatFixture(output)[0] as { text: string }).text;
 
     expect(text).toContain('**References (3):**');
     expect(text).not.toContain(' of 12');
@@ -515,7 +527,7 @@ describe('wikidataGetStatements', () => {
       statementCount: 3,
       labelsResolved: false,
     };
-    const lines = (wikidataGetStatements.format!(output)[0] as { text: string }).text.split('\n');
+    const lines = (formatFixture(output)[0] as { text: string }).text.split('\n');
 
     expect(lines).toContain('- -13798000000-00-00T00:00:00Z (precision 3: million years)');
     expect(lines).toContain('- +2001-00-00T00:00:00Z (precision 15)');
@@ -544,7 +556,7 @@ describe('wikidataGetStatements', () => {
       statementCount: 2,
       labelsResolved: true,
     };
-    const lines = (wikidataGetStatements.format!(output)[0] as { text: string }).text.split('\n');
+    const lines = (formatFixture(output)[0] as { text: string }).text.split('\n');
 
     expect(lines).toContain('- unknown value');
     expect(lines).toContain('  - P582: no value');
@@ -553,7 +565,9 @@ describe('wikidataGetStatements', () => {
     expect(lines).not.toContain('- ');
   });
 
-  it('makes no label lookup for an item-typed somevalue/novalue (#39)', async () => {
+  /** The snaks still name their properties, so the batch carries those P-IDs (#56) and no Q-ID. */
+  it('makes no Q-ID label lookup for an item-typed somevalue/novalue (#39)', async () => {
+    mockFetchLabels.mockResolvedValue({});
     mockFetchStatements.mockResolvedValue({
       P50: [
         {
@@ -582,7 +596,8 @@ describe('wikidataGetStatements', () => {
     const input = wikidataGetStatements.input.parse({ id: 'Q1', properties: ['P50'] });
     await wikidataGetStatements.handler(input, ctx);
 
-    expect(mockFetchLabels).not.toHaveBeenCalled();
+    const [requested] = mockFetchLabels.mock.calls[0] as [string[]];
+    expect([...requested].sort()).toEqual(['P1545', 'P248', 'P50']);
   });
 
   describe('nested label batch (#30, #37)', () => {
@@ -627,8 +642,12 @@ describe('wikidataGetStatements', () => {
 
       expect(mockFetchLabels).toHaveBeenCalledTimes(1);
       const [ids, languages] = mockFetchLabels.mock.calls[0] as [string[], string[]];
+      // The same batch carries the P-IDs the statements name (#56).
       expect([...ids].sort()).toEqual(
-        ['Q5', 'Q42395533', 'Q11573', 'Q19938912', 'Q150', 'Q712226'].sort(),
+        [
+          ...['Q5', 'Q42395533', 'Q11573', 'Q19938912', 'Q150', 'Q712226'],
+          ...['P31', 'P805', 'P2046', 'P248', 'P407'],
+        ].sort(),
       );
       expect(languages).toEqual(['de']);
     });
@@ -747,7 +766,7 @@ describe('wikidataGetStatements', () => {
       statementCount: 1,
       labelsResolved: true,
     };
-    const lines = (wikidataGetStatements.format!(output)[0] as { text: string }).text.split('\n');
+    const lines = (formatFixture(output)[0] as { text: string }).text.split('\n');
 
     expect(lines).toContain('- human (Q5)');
     expect(lines).toContain('  - P805: example (Q42395533)');
@@ -786,7 +805,7 @@ describe('wikidataGetStatements', () => {
       statementCount: 3,
       labelsResolved: true,
     };
-    const text = (wikidataGetStatements.format!(output)[0] as { text: string }).text;
+    const text = (formatFixture(output)[0] as { text: string }).text;
     const lines = text.split('\n');
 
     expect(lines).toContain('- +105.4 square kilometre (Q712226)');
@@ -850,7 +869,7 @@ describe('wikidataGetStatements', () => {
       statementCount: 4,
       labelsResolved: true,
     };
-    const lines = (wikidataGetStatements.format!(output)[0] as { text: string }).text.split('\n');
+    const lines = (formatFixture(output)[0] as { text: string }).text.split('\n');
 
     const displayed = lines.map(inlineText);
     expect(displayed).toContain('- +6378.137 [+6378.136, +6378.138] kilometre (Q828224)');
@@ -894,7 +913,7 @@ describe('wikidataGetStatements', () => {
       statementCount: 1,
       labelsResolved: true,
     };
-    const text = (wikidataGetStatements.format!(output)[0] as { text: string }).text;
+    const text = (formatFixture(output)[0] as { text: string }).text;
     const lines = text.split('\n');
 
     expect(lines).toContain('- P279');
@@ -905,11 +924,13 @@ describe('wikidataGetStatements', () => {
     expect(text).not.toContain('"');
   });
 
+  /** Its P-IDs go to the label batch (#56); with none resolved, the value renders bare. */
   it('end to end: a wikibase-property value is typed, unlabelled, and bare in both surfaces (#43)', async () => {
     const actual = await vi.importActual<
       typeof import('@/services/wikidata/wikidata-rest-service.js')
     >('@/services/wikidata/wikidata-rest-service.js');
     mockNormalizeStatements.mockImplementation(actual.normalizeStatements);
+    mockFetchLabels.mockResolvedValue({});
     /** P31 P1659, live. */
     mockFetchStatements.mockResolvedValue({
       P1659: [
@@ -930,7 +951,7 @@ describe('wikidataGetStatements', () => {
       ),
     );
 
-    expect(mockFetchLabels).not.toHaveBeenCalled();
+    expect(mockFetchLabels).toHaveBeenCalledWith(['P1659', 'P279'], ['en'], expect.anything());
     expect(result.statements?.P1659?.[0]?.value).toEqual({
       type: 'entity-id',
       entityType: 'property',
@@ -1002,7 +1023,7 @@ describe('wikidataGetStatements', () => {
       statementCount: 1,
       labelsResolved: false,
     };
-    const text = (wikidataGetStatements.format!(output)[0] as { text: string }).text;
+    const text = (formatFixture(output)[0] as { text: string }).text;
     expect(text).not.toContain('References');
   });
 
@@ -1194,7 +1215,8 @@ describe('wikidataGetStatements', () => {
         expect(result.kind).toBe('full');
         expect(mockFetchLabels).toHaveBeenCalledTimes(1);
         const [ids] = mockFetchLabels.mock.calls[0] as [string[]];
-        expect([...ids].sort()).toEqual(['Q1001', 'Q1002', 'Q1003']);
+        // The statement keys ride the same batch (#56).
+        expect([...ids].sort()).toEqual(['P1', 'P2', 'P3', 'Q1001', 'Q1002', 'Q1003']);
         expect(mockNormalizeStatements).toHaveBeenLastCalledWith('P3', expect.anything(), {
           Q1001: 'first',
         });
@@ -1233,15 +1255,90 @@ describe('wikidataGetStatements', () => {
         expect(JSON.stringify(result.statements).length).toBeGreaterThan(24_000);
       });
 
+      /**
+       * The caller cancels while the label batch is in flight. The batch sees the abort only
+       * through the context the handler passed it, and the handler must reject with the
+       * caller's own reason — not degrade to unlabelled statements or wrap it.
+       */
       it('propagates caller cancellation from the label batch', async () => {
         mockFetchStatements.mockResolvedValue(rawItemStatementsFor(3));
-        const abort = new DOMException('The operation was aborted.', 'AbortError');
-        mockFetchLabels.mockRejectedValue(abort);
+        const controller = new AbortController();
+        const reason = new DOMException('The operation was aborted.', 'AbortError');
+        mockFetchLabels.mockImplementation(
+          async (_ids: string[], _languages: string[], callCtx: { signal: AbortSignal }) => {
+            controller.abort(reason);
+            callCtx.signal.throwIfAborted();
+            return {};
+          },
+        );
+
+        const ctx = createMockContext({
+          errors: wikidataGetStatements.errors,
+          signal: controller.signal,
+        });
+        await expect(
+          wikidataGetStatements.handler(wikidataGetStatements.input.parse({ id: 'Q30' }), ctx),
+        ).rejects.toBe(reason);
+        expect(mockFetchLabels).toHaveBeenCalledTimes(1);
+        expect(ctx.signal.aborted).toBe(true);
+      });
+
+      /**
+       * Labels decorate the statements; they are not the answer. Every window sends a label batch
+       * for its P-IDs, so a label service that is down must not fail a call whose statements came
+       * back — the statements return unlabelled, and the result says so.
+       */
+      it.each([
+        [
+          'unavailable',
+          new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Wikidata MW API returned HTML.'),
+        ],
+        ['rate-limiting', new McpError(JsonRpcErrorCode.RateLimited, 'Too many requests.')],
+        [
+          'past its deadline',
+          new McpError(JsonRpcErrorCode.Timeout, 'The Wikidata label lookup did not finish.'),
+        ],
+      ])(
+        'returns the statements unlabelled, saying so on both surfaces, when the label lookup is %s',
+        async (_name, err) => {
+          mockFetchStatements.mockResolvedValue(rawStatements);
+          mockFetchLabels.mockRejectedValueOnce(err);
+
+          const result = await runToolContract(wikidataGetStatements, {
+            id: 'Q42',
+            properties: ['P31'],
+          });
+          const structured = result.structuredContent as {
+            kind: string;
+            labelsResolved: boolean;
+            statements?: Record<string, unknown[]>;
+            notice?: string;
+          };
+          const text = result.content.map((b) => (b as { text: string }).text).join('');
+
+          expect(result.isError).toBeFalsy();
+          expect(structured.kind).toBe('full');
+          expect(structured.statements?.P31).toHaveLength(1);
+          expect(structured.labelsResolved).toBe(false);
+          expect(structured).not.toHaveProperty('propertyLabels');
+          expect(structured.notice).toContain('Labels were not resolved');
+          expect(structured.notice).toContain('resolve_labels: false');
+          expect(inlineText(text)).toContain('Labels were not resolved');
+          expect(text).toContain('**Labels resolved:** false');
+        },
+      );
+
+      it('still fails the call when the label lookup fails for any other reason', async () => {
+        mockFetchStatements.mockResolvedValue(rawStatements);
+        mockFetchLabels.mockRejectedValueOnce(httpError(400));
 
         const ctx = createMockContext({ errors: wikidataGetStatements.errors });
         await expect(
-          wikidataGetStatements.handler(wikidataGetStatements.input.parse({ id: 'Q30' }), ctx),
-        ).rejects.toBe(abort);
+          wikidataGetStatements.handler(
+            wikidataGetStatements.input.parse({ id: 'Q42', properties: ['P31'] }),
+            ctx,
+          ),
+        ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
       });
     });
 
@@ -1283,10 +1380,11 @@ describe('wikidataGetStatements', () => {
         );
       });
 
+      /** A window wide enough for every property's 40 statements, so each property is whole. */
       const call = async (args: Record<string, unknown>) =>
         wikidataGetStatements.output.parse(
           await wikidataGetStatements.handler(
-            wikidataGetStatements.input.parse({ id: 'Q30', ...args }),
+            wikidataGetStatements.input.parse({ id: 'Q30', limit: 40, ...args }),
             createMockContext({ errors: wikidataGetStatements.errors }),
           ),
         );
@@ -1421,7 +1519,7 @@ describe('wikidataGetStatements', () => {
     });
 
     it('format: renders the outline sections and the re-call notice', () => {
-      const blocks = wikidataGetStatements.format!({
+      const blocks = formatFixture({
         id: 'Q30',
         kind: 'outline',
         propertyCount: 2,
@@ -1446,7 +1544,7 @@ describe('wikidataGetStatements', () => {
      * format-parity injects one sample with every optional field populated at once.
      */
     it('format: renders both arms when statements and sections are both present', () => {
-      const blocks = wikidataGetStatements.format!({
+      const blocks = formatFixture({
         id: 'Q30',
         kind: 'full',
         statements: {
@@ -1518,7 +1616,7 @@ describe('wikidataGetStatements', () => {
       const result = await call({ id: 'Q42', language });
 
       expect(result.isError).toBeFalsy();
-      expect(mockFetchLabels).toHaveBeenCalledWith(['Q5'], [expected], expect.anything());
+      expect(mockFetchLabels).toHaveBeenCalledWith(['Q5', 'P31'], [expected], expect.anything());
       // The label reached normalization — the map is keyed by the normalized code.
       expect(mockNormalizeStatements).toHaveBeenCalledWith('P31', rawStatements.P31, {
         Q5: 'human',
@@ -1537,5 +1635,868 @@ describe('wikidataGetStatements', () => {
         expect(mockFetchStatements).not.toHaveBeenCalled();
       },
     );
+  });
+
+  /**
+   * The statement pipeline — rank filter (#57), the per-property limit/offset window (#45), the
+   * outline decision, and one label batch over the returned window (#56) — run through the real
+   * normalizer and runToolContract, so both surfaces and the enrichment trailer are the wire's.
+   */
+  describe('statement pipeline', () => {
+    /** One raw statement as the REST endpoint sends it. */
+    const stmt = (
+      property: string,
+      n: number,
+      rank: 'preferred' | 'normal' | 'deprecated',
+      dataType = 'string',
+      content: unknown = `${property}-${n}`,
+    ) => ({
+      id: `Q64$${property}-${n}`,
+      rank,
+      property: { id: property, data_type: dataType },
+      value: { type: 'value', content },
+    });
+    /** `count` statements of `property`, ranked by `rankOf(index)`. */
+    const run = (
+      property: string,
+      count: number,
+      rankOf: (i: number) => 'preferred' | 'normal' | 'deprecated' = () => 'normal',
+    ) => Array.from({ length: count }, (_, i) => stmt(property, i, rankOf(i)));
+    /** The service narrows to the requested P-IDs; mirror that. */
+    const serve = (all: Record<string, unknown[]>) =>
+      mockFetchStatements.mockImplementation(async (_id: string, properties?: string[]) =>
+        properties?.length
+          ? Object.fromEntries(Object.entries(all).filter(([p]) => properties.includes(p)))
+          : all,
+      );
+    const callTool = (args: Record<string, unknown>) =>
+      runToolContract(wikidataGetStatements, { id: 'Q64', ...args } as never);
+    type Structured = {
+      kind: string;
+      statements?: Record<string, Array<{ id: string; rank: string }>>;
+      sections?: Array<{ name: string; bytes: number }>;
+      retrieval_notice?: string;
+      propertyCount: number;
+      statementCount: number;
+      notice?: string;
+      [key: string]: unknown;
+    };
+    const structured = (result: { structuredContent?: unknown }) =>
+      result.structuredContent as Structured;
+    const textOf = (result: { content: unknown[] }) =>
+      result.content.map((b) => (b as { text: string }).text).join('\n');
+    const ids = (result: { structuredContent?: unknown }, property: string) =>
+      (structured(result).statements?.[property] ?? []).map((s) => s.id);
+
+    beforeEach(async () => {
+      const actual = await vi.importActual<
+        typeof import('@/services/wikidata/wikidata-rest-service.js')
+      >('@/services/wikidata/wikidata-rest-service.js');
+      mockNormalizeStatements.mockImplementation(actual.normalizeStatements);
+      mockFetchLabels.mockResolvedValue({});
+    });
+
+    /** Characterization: pinned against the pre-pipeline code, and must hold under the defaults. */
+    it('returns every statement of each property, deprecated included, in upstream order, by default', async () => {
+      const ranks = ['deprecated', 'preferred', 'normal', 'normal', 'deprecated'] as const;
+      serve({
+        P1082: ranks.map((rank, i) => stmt('P1082', i, rank)),
+        P6: run('P6', 3),
+      });
+
+      const result = await callTool({ resolve_labels: false });
+      const text = textOf(result);
+
+      expect(result.isError).toBeFalsy();
+      expect(structured(result).kind).toBe('full');
+      expect(ids(result, 'P1082')).toEqual([0, 1, 2, 3, 4].map((i) => `Q64$P1082-${i}`));
+      expect(structured(result).statements?.P1082?.map((s) => s.rank)).toEqual([...ranks]);
+      expect(ids(result, 'P6')).toEqual(['Q64$P6-0', 'Q64$P6-1', 'Q64$P6-2']);
+      expect(structured(result).propertyCount).toBe(2);
+      expect(structured(result).statementCount).toBe(8);
+      for (const id of [...ids(result, 'P1082'), ...ids(result, 'P6')]) {
+        expect(text).toContain(`  - id: ${id}`);
+      }
+      expect(text.match(/~~\(deprecated\)~~/g)).toHaveLength(2);
+      expect(text.match(/ ★$/gm)).toHaveLength(1);
+    });
+
+    describe('rank filter (#57)', () => {
+      /** Q64 P1082 shape: 47 statements, one preferred (index 20). */
+      const p1082 = run('P1082', 47, (i) => (i === 20 ? 'preferred' : 'normal'));
+      /** Q64 P31 shape: 12 normal, 1 deprecated, no preferred. */
+      const p31 = run('P31', 13, (i) => (i === 4 ? 'deprecated' : 'normal'));
+      /** Q64 P2002 shape: deprecated only. */
+      const p2002 = run('P2002', 2, () => 'deprecated');
+
+      it('keeps only the preferred statement of a property that has one under "best"', async () => {
+        serve({ P1082: p1082 });
+
+        const result = await callTool({ properties: ['P1082'], rank: 'best' });
+
+        expect(result.isError).toBeFalsy();
+        expect(ids(result, 'P1082')).toEqual(['Q64$P1082-20']);
+        expect(structured(result).statementCount).toBe(1);
+        expect(structured(result).propertyTotals).toEqual({ P1082: 1 });
+        expect(structured(result).rank).toBe('best');
+        expect(textOf(result)).toContain('**Rank:** best');
+        expect(textOf(result)).toContain('  - id: Q64$P1082-20');
+      });
+
+      it.each([
+        ['omitted', {}],
+        ['"all"', { rank: 'all' }],
+      ])('counts all 47 statements when rank is %s', async (_label, args) => {
+        serve({ P1082: p1082 });
+
+        const result = await callTool({ properties: ['P1082'], ...args });
+
+        expect(result.isError).toBeFalsy();
+        expect(structured(result).rank).toBe('all');
+        expect(structured(result).statementCount).toBe(47);
+        expect(structured(result).propertyTotals).toEqual({ P1082: 47 });
+        expect(ids(result, 'P1082')).toContain('Q64$P1082-0');
+        expect(textOf(result)).toContain('**Rank:** all');
+      });
+
+      it('keeps the normal statements and never a deprecated one when no statement is preferred', async () => {
+        serve({ P31: p31 });
+
+        const result = await callTool({ properties: ['P31'], rank: 'best' });
+        const returned = structured(result).statements?.P31 ?? [];
+
+        expect(structured(result).statementCount).toBe(12);
+        expect(structured(result).propertyTotals).toEqual({ P31: 12 });
+        expect(returned.length).toBeGreaterThan(0);
+        expect(returned.every((s) => s.rank === 'normal')).toBe(true);
+        expect(ids(result, 'P31')).not.toContain('Q64$P31-4');
+        expect(textOf(result)).not.toContain('deprecated');
+      });
+
+      it('keeps none of a deprecated-only property, counts it as 0, and says why on both surfaces', async () => {
+        serve({ P2002: p2002 });
+
+        const result = await callTool({ properties: ['P2002'], rank: 'best' });
+        const notice = structured(result).notice ?? '';
+
+        expect(result.isError).toBeFalsy();
+        expect(structured(result).statements ?? {}).toEqual({});
+        expect(structured(result).propertyCount).toBe(0);
+        expect(structured(result).statementCount).toBe(0);
+        expect(structured(result).propertyTotals).toEqual({ P2002: 0 });
+        // At offset 0 an empty page is the rank's doing, never a paging overrun.
+        expect(notice).toBe(
+          'P2002 holds only deprecated statements, which rank "best" leaves out. Re-call with rank: "all" to read them.',
+        );
+        expect(textOf(result)).toContain('only deprecated statements');
+        expect(textOf(result)).toContain('P2002');
+      });
+
+      it('names a zero total, with no offset to page back to, past the end of a deprecated-only selection', async () => {
+        serve({ P2002: p2002 });
+
+        const result = await callTool({
+          properties: ['P2002'],
+          offset: 5,
+          rank: 'best',
+          resolve_labels: false,
+        });
+
+        expect(structured(result).returnedCount).toBe(0);
+        expect(structured(result).notice).toBe(
+          'offset 5 is past the end of every property here: the largest, P2002, holds 0 statements. P2002 holds only deprecated statements, which rank "best" leaves out. Re-call with rank: "all" to read them.',
+        );
+        expect(textOf(result)).toContain('holds 0 statements');
+        expect(textOf(result)).not.toContain('offset below');
+      });
+
+      it('makes the choice per property in one call', async () => {
+        serve({ P1082: p1082, P31: p31, P2002: p2002 });
+
+        const result = await callTool({ properties: ['P1082', 'P31', 'P2002'], rank: 'best' });
+
+        expect(ids(result, 'P1082')).toEqual(['Q64$P1082-20']);
+        expect(structured(result).statements?.P31?.every((s) => s.rank === 'normal')).toBe(true);
+        expect(structured(result).statements).not.toHaveProperty('P2002');
+        expect(structured(result).propertyTotals).toEqual({ P1082: 1, P31: 12, P2002: 0 });
+        expect(structured(result).statementCount).toBe(13);
+      });
+
+      it('raises no deprecated-only notice under "all", which keeps those statements', async () => {
+        serve({ P2002: p2002 });
+
+        const result = await callTool({ properties: ['P2002'] });
+
+        expect(ids(result, 'P2002')).toEqual(['Q64$P2002-0', 'Q64$P2002-1']);
+        expect(structured(result).notice).toBeUndefined();
+      });
+
+      /** Two properties, each one small preferred statement beside a heavy deprecated tail. */
+      const heavyTail = (property: string, qid: string) => [
+        stmt(property, 0, 'preferred', 'wikibase-item', qid),
+        ...Array.from({ length: 4 }, (_, i) =>
+          stmt(property, i + 1, 'deprecated', 'string', 'x'.repeat(4_000)),
+        ),
+      ];
+
+      it('sizes the outline decision on the kept statements only', async () => {
+        serve({ P1: heavyTail('P1', 'Q1001'), P2: heavyTail('P2', 'Q1002') });
+
+        const all = await callTool({ resolve_labels: false });
+        const best = await callTool({ resolve_labels: false, rank: 'best' });
+
+        expect(structured(all).kind).toBe('outline');
+        expect(structured(best).kind).toBe('full');
+        expect(ids(best, 'P1')).toEqual(['Q64$P1-0']);
+        expect(ids(best, 'P2')).toEqual(['Q64$P2-0']);
+      });
+
+      it('sends only the kept statements to the label batch', async () => {
+        serve({
+          P1: heavyTail('P1', 'Q1001').map((s, i) =>
+            i === 0 ? s : stmt('P1', i, 'deprecated', 'wikibase-item', `Q${2000 + i}`),
+          ),
+        });
+
+        await callTool({ rank: 'best' });
+
+        expect(mockFetchLabels).toHaveBeenCalledTimes(1);
+        const [requested] = mockFetchLabels.mock.calls[0] as [string[]];
+        expect(requested).toContain('Q1001');
+        expect(requested.filter((id) => id.startsWith('Q2'))).toEqual([]);
+      });
+
+      it('outlines a kept set still over budget with sections sized on it, and no label request (#40)', async () => {
+        const keptHeavy = (property: string) => [
+          stmt(property, 0, 'preferred', 'string', 'y'.repeat(15_000)),
+          stmt(property, 1, 'deprecated', 'string', 'x'.repeat(30_000)),
+        ];
+        serve({ P1: keptHeavy('P1'), P2: keptHeavy('P2') });
+
+        const result = await callTool({ rank: 'best' });
+        const sections = structured(result).sections ?? [];
+
+        expect(mockFetchLabels).not.toHaveBeenCalled();
+        expect(structured(result).kind).toBe('outline');
+        expect(sections.map((s) => s.name).sort()).toEqual(['P1', 'P2']);
+        for (const s of sections) {
+          expect(s.bytes).toBeGreaterThan(15_000);
+          expect(s.bytes).toBeLessThan(16_000);
+        }
+        expect(structured(result).statementCount).toBe(2);
+      });
+
+      it('rejects a rank outside the enum at schema validation', async () => {
+        const result = await callTool({ rank: 'preferred' });
+
+        expect(result.isError).toBe(true);
+        expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
+          JsonRpcErrorCode.InvalidParams,
+        );
+        expect(mockFetchStatements).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('limit and offset window (#45)', () => {
+      /** Q183 P530 shape: 190 statements. */
+      const p530 = run('P530', 190);
+      const p530Ids = p530.map((s) => s.id);
+
+      /** Zod 4 `.int()` advertises the safe-integer bound as `maximum`; no cap rides with it. */
+      it('advertises limit with minimum 1 and no cap as its maximum, and offset with minimum 0', () => {
+        const schema = z.toJSONSchema(wikidataGetStatements.input, { io: 'input' }) as {
+          properties: Record<string, { minimum?: number; maximum?: number; default?: unknown }>;
+        };
+
+        expect(schema.properties.limit).toMatchObject({ minimum: 1, default: 10 });
+        expect(schema.properties.limit?.maximum ?? Number.MAX_SAFE_INTEGER).toBe(
+          Number.MAX_SAFE_INTEGER,
+        );
+        expect(schema.properties.offset).toMatchObject({ minimum: 0, default: 0 });
+      });
+
+      it.each([
+        ['limit: 0', { limit: 0 }],
+        ['offset: -1', { offset: -1 }],
+        ['a fractional limit', { limit: 2.5 }],
+      ])('rejects %s at schema validation', async (_label, args) => {
+        const result = await callTool(args);
+
+        expect(result.isError).toBe(true);
+        expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
+          JsonRpcErrorCode.InvalidParams,
+        );
+        expect(mockFetchStatements).not.toHaveBeenCalled();
+      });
+
+      it('returns the first 10 statements by default, the total, and the next offset', async () => {
+        serve({ P530: p530 });
+
+        const result = await callTool({ properties: ['P530'], resolve_labels: false });
+        const text = textOf(result);
+
+        expect(ids(result, 'P530')).toEqual(p530Ids.slice(0, 10));
+        expect(structured(result).propertyTotals).toEqual({ P530: 190 });
+        expect(structured(result).statementCount).toBe(190);
+        expect(structured(result).returnedCount).toBe(10);
+        expect(structured(result).nextOffset).toBe(10);
+        expect(structured(result).truncated).toBe(true);
+        expect(text).toContain('**Returned:** 10');
+        expect(text).toContain('**Next offset:** 10');
+        expect(text).toContain('**Property totals:** P530: 190');
+        expect(text).toContain('**Truncated:** true');
+      });
+
+      it('returns the last page at offset 180 with no next offset', async () => {
+        serve({ P530: p530 });
+
+        const result = await callTool({ properties: ['P530'], offset: 180, resolve_labels: false });
+
+        expect(ids(result, 'P530')).toEqual(p530Ids.slice(180));
+        expect(structured(result).returnedCount).toBe(10);
+        expect(structured(result)).not.toHaveProperty('nextOffset');
+        expect(structured(result)).not.toHaveProperty('truncated');
+        expect(textOf(result)).not.toContain('Next offset');
+        expect(textOf(result)).not.toContain('Truncated');
+        expect(structured(result).notice).toBeUndefined();
+      });
+
+      it('returns every statement once, in upstream order, when nextOffset is followed from 0', async () => {
+        serve({ P530: p530 });
+
+        const seen: string[] = [];
+        let offset: number | undefined = 0;
+        let calls = 0;
+        while (offset !== undefined && calls < 50) {
+          const result = await callTool({
+            properties: ['P530'],
+            offset,
+            limit: 7,
+            resolve_labels: false,
+          });
+          seen.push(...ids(result, 'P530'));
+          offset = structured(result).nextOffset as number | undefined;
+          calls++;
+        }
+
+        expect(seen).toEqual(p530Ids);
+        expect(calls).toBe(Math.ceil(190 / 7));
+      });
+
+      it('windows each property on its own, omits a property paged past its end, and totals every property', async () => {
+        serve({ P530: p530, P31: run('P31', 12), P6: run('P6', 3) });
+
+        const result = await callTool({ offset: 10, limit: 5, resolve_labels: false });
+
+        expect(ids(result, 'P530')).toEqual(p530Ids.slice(10, 15));
+        expect(ids(result, 'P31')).toEqual(['Q64$P31-10', 'Q64$P31-11']);
+        expect(structured(result).statements).not.toHaveProperty('P6');
+        expect(structured(result).propertyTotals).toEqual({ P530: 190, P31: 12, P6: 3 });
+        expect(structured(result).propertyCount).toBe(2);
+        expect(structured(result).statementCount).toBe(205);
+        expect(structured(result).returnedCount).toBe(7);
+        expect(structured(result).nextOffset).toBe(15);
+      });
+
+      it('returns no statements past every total, with a notice naming the largest', async () => {
+        serve({ P530: p530, P31: run('P31', 12) });
+
+        const result = await callTool({ offset: 400, resolve_labels: false });
+        const notice = structured(result).notice ?? '';
+
+        expect(result.isError).toBeFalsy();
+        expect(structured(result).kind).toBe('full');
+        expect(structured(result).statements ?? {}).toEqual({});
+        expect(structured(result).returnedCount).toBe(0);
+        expect(structured(result)).not.toHaveProperty('nextOffset');
+        expect(structured(result).propertyTotals).toEqual({ P530: 190, P31: 12 });
+        expect(notice).toContain('offset 400');
+        expect(notice).toContain('P530');
+        expect(notice).toContain('190');
+        expect(textOf(result)).toContain('offset 400');
+      });
+
+      it('raises no past-the-end notice for an entity with no statements', async () => {
+        serve({});
+
+        const result = await callTool({ offset: 20, resolve_labels: false });
+
+        expect(structured(result).returnedCount).toBe(0);
+        expect(structured(result).notice).toBeUndefined();
+      });
+
+      it('serves a limit above 500 at 500 with a notice naming both values on both surfaces', async () => {
+        serve({ P1: run('P1', 620) });
+
+        const result = await callTool({ properties: ['P1'], limit: 800, resolve_labels: false });
+        const notice = structured(result).notice ?? '';
+
+        expect(result.isError).toBeFalsy();
+        expect(structured(result).returnedCount).toBe(500);
+        expect(structured(result).nextOffset).toBe(500);
+        expect(notice).toContain('800');
+        expect(notice).toContain('500');
+        expect(notice).toContain('Page through the rest with offset');
+        expect(textOf(result)).toContain('800');
+      });
+
+      it('names the clamp but not paging when the clamped window holds every statement', async () => {
+        serve({ P530: p530 });
+
+        const result = await callTool({ properties: ['P530'], limit: 800, resolve_labels: false });
+        const notice = structured(result).notice ?? '';
+
+        expect(structured(result).returnedCount).toBe(190);
+        expect(structured(result)).not.toHaveProperty('nextOffset');
+        expect(notice).toContain('800');
+        expect(notice).toContain('500');
+        expect(notice).not.toContain('Page through the rest');
+        expect(textOf(result)).not.toContain('Page through the rest');
+      });
+
+      it('serves a limit of exactly 500 with no notice', async () => {
+        serve({ P1: run('P1', 620) });
+
+        const result = await callTool({ properties: ['P1'], limit: 500, resolve_labels: false });
+
+        expect(structured(result).returnedCount).toBe(500);
+        expect(structured(result).notice).toBeUndefined();
+      });
+
+      it('joins every notice a call raises into one', async () => {
+        serve({ P530: p530, P2002: run('P2002', 2, () => 'deprecated') });
+
+        const result = await callTool({
+          limit: 900,
+          offset: 300,
+          rank: 'best',
+          resolve_labels: false,
+        });
+        const notice = structured(result).notice ?? '';
+
+        expect(notice).toContain('900');
+        expect(notice).toContain('offset 300');
+        expect(notice).toContain('P2002 holds only deprecated statements');
+        expect(textOf(result)).toContain('P2002 holds only deprecated statements');
+        expect(textOf(result)).toContain('offset 300');
+      });
+
+      it('rejects a limit above 500, naming the cap, before any upstream call when WIKIDATA_CLAMP_LIMITS=false', async () => {
+        vi.stubEnv('WIKIDATA_CLAMP_LIMITS', 'false');
+        vi.resetModules();
+        try {
+          const fresh = (await import('@/mcp-server/tools/definitions/get-statements.tool.js'))
+            .wikidataGetStatements;
+          const result = await runToolContract(fresh, { id: 'Q64', limit: 800 } as never);
+          const error = (result.structuredContent as { error: { code: number; message: string } })
+            .error;
+
+          expect(result.isError).toBe(true);
+          expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+          expect(error.message).toContain('500');
+          expect(mockFetchStatements).not.toHaveBeenCalled();
+        } finally {
+          vi.unstubAllEnvs();
+          vi.resetModules();
+        }
+      });
+
+      it('covers only the returned window in the label batch', async () => {
+        serve({
+          P50: Array.from({ length: 30 }, (_, i) =>
+            stmt('P50', i, 'normal', 'wikibase-item', `Q${5000 + i}`),
+          ),
+        });
+
+        await callTool({ properties: ['P50'], offset: 10 });
+
+        expect(mockFetchLabels).toHaveBeenCalledTimes(1);
+        const [requested] = mockFetchLabels.mock.calls[0] as [string[]];
+        expect(requested.filter((id) => id.startsWith('Q')).sort()).toEqual(
+          Array.from({ length: 10 }, (_, i) => `Q${5010 + i}`).sort(),
+        );
+      });
+
+      it('returns a single property at its window for any limit up to the cap, never as an outline', async () => {
+        serve({
+          P1: Array.from({ length: 500 }, (_, i) =>
+            stmt('P1', i, 'normal', 'string', 'z'.repeat(200)),
+          ),
+        });
+
+        const result = await callTool({ properties: ['P1'], limit: 500, resolve_labels: false });
+
+        expect(structured(result).kind).toBe('full');
+        expect(structured(result).returnedCount).toBe(500);
+        expect(structured(result)).not.toHaveProperty('sections');
+        expect(JSON.stringify(structured(result).statements).length).toBeGreaterThan(24_000);
+      });
+
+      describe('the outline measured on the window', () => {
+        /** P1..P8, 40 statements each: every fourth preferred, each value 2,000 bytes. */
+        const wide = Object.fromEntries(
+          Array.from({ length: 8 }, (_, p) => [
+            `P${p + 1}`,
+            Array.from({ length: 40 }, (_, s) =>
+              stmt(
+                `P${p + 1}`,
+                s,
+                s % 4 === 0 ? 'preferred' : 'normal',
+                'string',
+                'w'.repeat(2_000),
+              ),
+            ),
+          ]),
+        );
+        const window = { limit: 3, offset: 2, rank: 'best' };
+
+        it('outlines an over-budget page with no label request, sized on the window, and no next offset', async () => {
+          serve(wide);
+
+          const result = await callTool(window);
+          const sections = structured(result).sections ?? [];
+
+          expect(mockFetchLabels).not.toHaveBeenCalled();
+          expect(structured(result).kind).toBe('outline');
+          expect(sections).toHaveLength(8);
+          // Three 2,000-byte statements per section: the window, not the property's 10 kept or 40 raw.
+          for (const s of sections) {
+            expect(s.bytes).toBeGreaterThan(6_000);
+            expect(s.bytes).toBeLessThan(7_000);
+          }
+          expect(structured(result).returnedCount).toBe(0);
+          expect(structured(result)).not.toHaveProperty('nextOffset');
+          expect(structured(result)).not.toHaveProperty('truncated');
+          expect(structured(result).statementCount).toBe(80);
+          expect(structured(result).propertyTotals).toMatchObject({ P1: 10, P8: 10 });
+        });
+
+        it('names limit, offset, and rank in the re-call, and walking it verbatim returns the full window', async () => {
+          serve(wide);
+
+          const outline = await callTool(window);
+          const notice = structured(outline).retrieval_notice ?? '';
+          const recipe = {
+            limit: Number(notice.match(/limit: (\d+)/)?.[1]),
+            offset: Number(notice.match(/offset: (\d+)/)?.[1]),
+            rank: notice.match(/rank: "(\w+)"/)?.[1],
+            properties: JSON.parse(notice.match(/properties:(\[[^\]]*"[^\]]*\])/)?.[1] ?? '[]'),
+          };
+          expect(recipe).toMatchObject(window);
+          expect(recipe.properties.length).toBeGreaterThan(1);
+
+          const recall = await callTool({ ...recipe, resolve_labels: false });
+
+          expect(structured(recall).kind).toBe('full');
+          expect(Object.keys(structured(recall).statements ?? {}).sort()).toEqual(
+            [...recipe.properties].sort(),
+          );
+          // The listed sizes are the windowed selection's own bytes, so they add up.
+          const listed = new Map(
+            (structured(outline).sections ?? []).map((s) => [s.name, s.bytes]),
+          );
+          for (const [name, stmts] of Object.entries(structured(recall).statements ?? {})) {
+            expect(Buffer.byteLength(JSON.stringify({ [name]: stmts }), 'utf8')).toBe(
+              listed.get(name),
+            );
+          }
+          expect(
+            Buffer.byteLength(JSON.stringify(structured(recall).statements), 'utf8'),
+          ).toBeLessThanOrEqual(24_000);
+        });
+
+        it('returns kind "full" for any selection whose listed sizes sum to 24,000 or less', async () => {
+          serve(wide);
+
+          const outline = await callTool(window);
+          const chosen: string[] = [];
+          let sum = 0;
+          for (const s of [...(structured(outline).sections ?? [])].reverse()) {
+            if (sum + s.bytes <= 24_000) {
+              chosen.push(s.name);
+              sum += s.bytes;
+            }
+          }
+          expect(chosen.length).toBeGreaterThan(1);
+
+          const recall = await callTool({ ...window, properties: chosen });
+          expect(structured(recall).kind).toBe('full');
+          expect(structured(recall).returnedCount).toBe(chosen.length * 3);
+        });
+
+        it('names limit, offset, and rank in the one-property re-call when no section fits on its own', async () => {
+          const oversized = (property: string) => [
+            stmt(property, 0, 'normal'),
+            stmt(property, 1, 'normal', 'string', 'v'.repeat(30_000)),
+          ];
+          serve({ P1: oversized('P1'), P2: oversized('P2') });
+
+          const result = await callTool({ limit: 1, offset: 1, rank: 'best' });
+          const notice = structured(result).retrieval_notice ?? '';
+          const recall =
+            'Every property here is larger than the budget on its own; re-call wikidata_get_statements with the same id, limit: 1, offset: 1, and rank: "best", plus properties:[...] naming one P-ID per call.';
+
+          expect(structured(result).kind).toBe('outline');
+          expect((structured(result).sections ?? []).map((s) => s.name).sort()).toEqual([
+            'P1',
+            'P2',
+          ]);
+          expect(notice).toContain(recall);
+          expect(notice).not.toContain('e.g. properties:');
+          expect(textOf(result)).toContain(recall);
+        });
+      });
+    });
+
+    describe('property labels (#56)', () => {
+      const snak = (property: string, dataType: string, content: unknown) => ({
+        property: { id: property, data_type: dataType },
+        value: { type: 'value', content },
+      });
+      /** Q1497 P2043 shape: two P1310 qualifiers, one reference citing P854, P50, and P1476. */
+      const p2043 = [
+        {
+          id: 'Q1497$length',
+          rank: 'normal',
+          ...snak('P2043', 'quantity', {
+            amount: '+3766',
+            unit: 'http://www.wikidata.org/entity/Q828224',
+            upperBound: '+3767',
+            lowerBound: '+3765',
+          }),
+          qualifiers: [
+            snak('P1310', 'wikibase-item', 'Q14692877'),
+            snak('P1310', 'wikibase-item', 'Q7000'),
+          ],
+          references: [
+            {
+              parts: [
+                snak('P854', 'url', 'https://example.org/river-facts'),
+                snak('P50', 'wikibase-item', 'Q7001'),
+                snak('P1476', 'monolingualtext', { text: 'River Facts', language: 'en' }),
+              ],
+            },
+          ],
+        },
+      ];
+      const labels: Record<string, string> = {
+        P2043: 'length',
+        P1310: 'statement disputed by',
+        P854: 'reference URL',
+        P50: 'author',
+        P1476: 'title',
+        P1659: 'related property',
+        P279: 'subclass of',
+        Q828224: 'kilometre',
+        Q14692877: 'Mississippi National River and Recreation Area',
+      };
+      /** Answers each requested ID whose label is known; the rest are absent, as upstream. */
+      const answerFrom = (known: Record<string, string>) =>
+        mockFetchLabels.mockImplementation(async (requested: string[]) =>
+          Object.fromEntries(
+            requested
+              .filter((id) => known[id])
+              .map((id) => [id, { labels: { en: known[id] }, descriptions: {} }]),
+          ),
+        );
+      const lines = (result: { content: unknown[] }) => textOf(result).split('\n');
+
+      it('labels statement, qualifier, and reference-part P-IDs in one map and beside each P-ID', async () => {
+        serve({ P2043: p2043 });
+        answerFrom(labels);
+
+        const result = await callTool({ id: 'Q1497', properties: ['P2043'] });
+
+        expect(result.isError).toBeFalsy();
+        expect(structured(result).propertyLabels).toEqual({
+          P2043: 'length',
+          P1310: 'statement disputed by',
+          P854: 'reference URL',
+          P50: 'author',
+          P1476: 'title',
+        });
+        const shown = lines(result).map(inlineText);
+        expect(shown).toContain('### P2043 (length)');
+        expect(shown).toContain('- +3766 [+3765, +3767] kilometre (Q828224)');
+        expect(shown).toContain(
+          '  - P1310 (statement disputed by): Mississippi National River and Recreation Area (Q14692877)',
+        );
+        expect(shown).toContain('  - P1310 (statement disputed by): Q7000');
+        expect(shown).toContain('      - P854 (reference URL): https://example.org/river-facts');
+        expect(shown).toContain('      - P50 (author): Q7001');
+        expect(shown).toContain('      - P1476 (title): River Facts [en]');
+      });
+
+      it('leaves a P-ID the batch did not resolve out of the map, rendered bare', async () => {
+        serve({ P2043: p2043 });
+        const { P50: _unresolved, ...rest } = labels;
+        answerFrom(rest);
+
+        const result = await callTool({ id: 'Q1497', properties: ['P2043'] });
+
+        expect(structured(result).propertyLabels).not.toHaveProperty('P50');
+        expect(structured(result).propertyLabels).toHaveProperty('P854', 'reference URL');
+        expect(lines(result)).toContain('      - P50: Q7001');
+      });
+
+      it('labels a property-typed value from the same map, leaving its structured value as it was', async () => {
+        serve({
+          P1659: [{ id: 'P31$1', rank: 'normal', ...snak('P1659', 'wikibase-property', 'P279') }],
+        });
+        answerFrom(labels);
+
+        const result = await callTool({ id: 'P31', properties: ['P1659'] });
+        const [value] = (structured(result).statements?.P1659 ?? []) as unknown as Array<{
+          value: unknown;
+        }>;
+
+        expect(value?.value).toEqual({ type: 'entity-id', entityType: 'property', id: 'P279' });
+        expect(structured(result).propertyLabels).toEqual({
+          P1659: 'related property',
+          P279: 'subclass of',
+        });
+        expect(lines(result)).toContain('### P1659 (related property)');
+        expect(lines(result)).toContain('- subclass of (P279)');
+      });
+
+      it('labels a property-typed qualifier value and reference-part value from the same map', async () => {
+        serve({
+          P1659: [
+            {
+              id: 'P279$1',
+              rank: 'normal',
+              ...snak('P1659', 'wikibase-property', 'P31'),
+              qualifiers: [snak('P1696', 'wikibase-property', 'P1647')],
+              references: [{ parts: [snak('P1659', 'wikibase-property', 'P279')] }],
+            },
+          ],
+        });
+        answerFrom({
+          ...labels,
+          P31: 'instance of',
+          P1696: 'inverse property',
+          P1647: 'subproperty of',
+        });
+
+        const result = await callTool({ id: 'P279', properties: ['P1659'] });
+
+        expect(structured(result).propertyLabels).toEqual({
+          P1659: 'related property',
+          P31: 'instance of',
+          P1696: 'inverse property',
+          P1647: 'subproperty of',
+          P279: 'subclass of',
+        });
+        expect(lines(result)).toContain('- instance of (P31)');
+        expect(lines(result)).toContain('  - P1696 (inverse property): subproperty of (P1647)');
+        expect(lines(result)).toContain('      - P1659 (related property): subclass of (P279)');
+      });
+
+      it('sends P-IDs and QIDs in one deduplicated label call', async () => {
+        serve({
+          P2043: p2043,
+          P2044: [
+            {
+              id: 'Q1497$elevation',
+              rank: 'normal',
+              ...snak('P2044', 'quantity', {
+                amount: '+450',
+                unit: 'http://www.wikidata.org/entity/Q828224',
+              }),
+              qualifiers: [snak('P1310', 'wikibase-item', 'Q14692877')],
+            },
+          ],
+        });
+        answerFrom(labels);
+
+        await callTool({ id: 'Q1497' });
+
+        expect(mockFetchLabels).toHaveBeenCalledTimes(1);
+        const [requested, languages] = mockFetchLabels.mock.calls[0] as [string[], string[]];
+        expect(requested).toHaveLength(new Set(requested).size);
+        expect([...requested].sort()).toEqual(
+          [
+            'P2043',
+            'P2044',
+            'P1310',
+            'P854',
+            'P50',
+            'P1476',
+            'Q828224',
+            'Q14692877',
+            'Q7000',
+            'Q7001',
+          ].sort(),
+        );
+        expect(languages).toEqual(['en']);
+      });
+
+      it('makes no label request and carries no property labels when resolve_labels is false', async () => {
+        serve({ P2043: p2043 });
+
+        const result = await callTool({
+          id: 'Q1497',
+          properties: ['P2043'],
+          resolve_labels: false,
+        });
+
+        expect(mockFetchLabels).not.toHaveBeenCalled();
+        expect(structured(result)).not.toHaveProperty('propertyLabels');
+        expect(lines(result)).toContain('### P2043');
+        expect(lines(result)).toContain('  - P1310: Q14692877');
+      });
+
+      it('makes no label request and carries no property labels on an outline (#40)', async () => {
+        serve({
+          P1: [stmt('P1', 0, 'normal', 'string', 'a'.repeat(15_000))],
+          P2: [stmt('P2', 0, 'normal', 'string', 'b'.repeat(15_000))],
+        });
+        answerFrom(labels);
+
+        const result = await callTool({});
+
+        expect(structured(result).kind).toBe('outline');
+        expect(mockFetchLabels).not.toHaveBeenCalled();
+        expect(structured(result)).not.toHaveProperty('propertyLabels');
+      });
+
+      it('labels only the P-IDs of the returned window', async () => {
+        serve({
+          P2043: [
+            ...Array.from({ length: 10 }, (_, i) => ({
+              id: `Q1497$head-${i}`,
+              rank: 'normal',
+              ...snak('P2043', 'string', `v${i}`),
+            })),
+            {
+              id: 'Q1497$tail',
+              rank: 'normal',
+              ...snak('P2043', 'string', 'tail'),
+              qualifiers: [snak('P9000', 'string', 'past the window')],
+            },
+          ],
+        });
+        answerFrom(labels);
+
+        await callTool({ id: 'Q1497', properties: ['P2043'] });
+
+        const [requested] = mockFetchLabels.mock.calls[0] as [string[]];
+        expect(requested).toEqual(['P2043']);
+      });
+
+      it('escapes a property label in content[] and keeps it raw in structuredContent', async () => {
+        const hostile = '*bold* [x](javascript:alert) `tick`';
+        serve({ P2043: p2043 });
+        answerFrom({ ...labels, P1310: hostile });
+
+        const result = await callTool({ id: 'Q1497', properties: ['P2043'] });
+
+        expect(structured(result).propertyLabels).toHaveProperty('P1310', hostile);
+        expect(textOf(result)).not.toContain(hostile);
+        expect(lines(result).map(inlineText)).toContain(
+          `  - P1310 (${hostile}): Mississippi National River and Recreation Area (Q14692877)`,
+        );
+      });
+    });
   });
 });

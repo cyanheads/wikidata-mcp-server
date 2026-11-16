@@ -22,11 +22,11 @@ Use Wikidata for structured relationships, identifiers, multilingual entity name
 ## Gates
 
 1. **Settle identity before joining facts.** Compare candidate descriptions and relevant statements with the known person, place, or work. Search rank and matching labels alone are insufficient. If candidates remain indistinguishable, report the ambiguity or ask for the missing discriminator.
-2. **Separate resolver outcomes.** Inspect `multipleMatches` before interpreting a null match as a miss; fetch candidates to disambiguate them. An ordinary null means no indexed match, not proof of absence: the Query Service can lag the live wiki. Inspect known candidate entities directly when recent edits matter.
+2. **Separate resolver outcomes.** Inspect `multipleMatches` before interpreting a null match as a miss; fetch candidates to disambiguate them. Check `unavailableGraphs` too: a graph named there (`wikidata_main` or `scholarly_articles`) was not searched, so retry before calling the result a miss. An ordinary null means no indexed match, not proof of absence: the Query Service can lag the live wiki. Inspect known candidate entities directly when recent edits matter. A match's `rank` says how the entity holds the identifier; `deprecated` usually means a retired or mistaken ID, so confirm the entity before relying on it.
 3. **Retrieve claims before citing them.** A `kind: "outline"` response contains an inventory, not the statements or entity fields. Follow `retrieval_notice`; do not turn section names or counts into evidence.
-4. **Read statement context before making a factual conclusion.** Inspect rank, qualifiers, and references, keeping each reference's parts together. Preferred rank can express recency or consensus; it does not alone establish that a value is current. Check time qualifiers for time-sensitive claims, and state when Wikidata supplies no supporting reference.
+4. **Read statement context before making a factual conclusion.** Inspect rank, qualifiers, and references, keeping each reference's parts together. Preferred rank can express recency or consensus; it does not alone establish that a value is current. For a property's current-best values, `rank: "best"` on `wikidata_get_statements` keeps the preferred statements, or the normal ones when none is preferred, and never deprecated ones — the same statements SPARQL's truthy `wdt:` reads. Check time qualifiers for time-sensitive claims, and state when Wikidata supplies no supporting reference.
 5. **Preserve the value's meaning.** `somevalue` means an unknown value, `novalue` an explicit absence; neither means a missing property. Preserve time precision, quantity units and bounds, coordinate precision, and language tags when present. Do not convert a year-precision time into a known day, or an unresolved Q-ID into a guessed label.
-6. **Check coverage before saying “all” or “none.”** Inspect search pagination, SPARQL counts and notices, and label lookup misses. SPARQL `truncated` signals an inferred upstream row cap; response-budget cuts are reported separately. A false flag, a LIMIT-bounded query, or a page of results does not prove completeness. Describe an empty query as no matching indexed rows under that query's conditions.
+6. **Check coverage before saying “all” or “none.”** Inspect search pagination, SPARQL counts and notices, statement paging, and label lookup misses. A SPARQL call returns at most 4,000 rows; a larger result comes back with `truncated: true`, `shown`, `cap`, and a notice, and without `totalCount`, since the rows past the ceiling were never read. Statements return 10 per property by default: `propertyTotals` counts what each property holds, and `nextOffset` continues every property. Labels past the first 500 distinct IDs come back in `deferredIds`. A missing flag, a LIMIT-bounded query, or a page of results does not prove completeness. Describe an empty query as no matching indexed rows under that query's conditions.
 
 ## Core chain
 
@@ -36,13 +36,13 @@ Resolve identity → discover relevant properties → retrieve targeted statemen
 
 ### Verify a named entity's fact
 
-Search the name, then inspect plausible candidates with `wikidata_get_entity`. Find the predicate with property search if its P-ID is unknown. Use `wikidata_get_statements` for the chosen entity and relevant predicates. For an affiliation or office, examine date qualifiers before presenting it as current; for a quantity, keep the unit beside the value. Resolve remaining predicate labels with `wikidata_get_labels` when needed.
+Search the name, then inspect plausible candidates with `wikidata_get_entity`. Find the predicate with property search if its P-ID is unknown. Use `wikidata_get_statements` for the chosen entity and relevant predicates; it labels the properties it returns in `propertyLabels`. For an affiliation or office, examine date qualifiers before presenting it as current; for a quantity, keep the unit beside the value.
 
-If the entity fetch outlines statements, switch to `wikidata_get_statements`. If that tool outlines properties, retrieve only those needed for the question, following its notice. A single property is returned whole and can still be large. For oversized sitelinks, use `wikidata_get_sitelinks`; narrow multilingual fields on the entity fetch instead of repeatedly requesting the same oversized category.
+If the entity fetch outlines statements, switch to `wikidata_get_statements`. If that tool outlines properties, retrieve only those needed for the question, following its notice with the same `limit`, `offset`, and `rank`. A single property is never outlined: it returns its `limit` statements from `offset`, so page it with `nextOffset` when `propertyTotals` shows more. For oversized sitelinks, use `wikidata_get_sitelinks`; narrow multilingual fields on the entity fetch instead of repeatedly requesting the same oversized category.
 
 ### Join an external record to Wikidata and Wikipedia
 
-Start with the identifier in the source record and resolve it with `wikidata_resolve_external_id`. Check the echoed normalized value, especially for unfamiliar identifier schemes whose value is passed through without scheme-specific normalization. On ambiguity, compare candidate entities against the source record. On success, retrieve the needed statements or use `wikidata_get_sitelinks` for article URLs. No sitelink means no link was returned for that item and selection, not that Wikipedia has no relevant article.
+Start with the identifier in the source record and resolve it with `wikidata_resolve_external_id`. Check the echoed normalized value, especially for identifier schemes other than DOI, PubMed, ORCID, OpenAlex, and IMDb, whose value is passed through without scheme-specific normalization. DOIs and PubMed IDs of scholarly articles resolve too: the lookup searches the scholarly-article graph beside the main one. On ambiguity, compare candidate entities against the source record. On success, retrieve the needed statements or use `wikidata_get_sitelinks` for article URLs. No sitelink means no link was returned for that item and selection, not that Wikipedia has no relevant article.
 
 ### Query relationships or aggregate a set
 
@@ -50,10 +50,12 @@ Resolve the query's subjects, classes, and unfamiliar predicates before writing 
 
 Keep queries selective. On timeout, narrow graph patterns or simplify traversal rather than repeatedly increasing the wait. On throttling, follow the returned recovery guidance and reduce concurrent queries. For multiple pages, use stable ordering and retain the same query conditions; changing live data can still move rows between pages. Use aggregation when the user needs counts rather than individual records.
 
-Read each SPARQL binding's type and value; a URI, language-tagged literal, and typed literal are different kinds of result. Extract Q-IDs only from Wikidata entity URIs, then use `wikidata_get_labels` for unresolved display names. Keep the IDs even when labels are available.
+Scholarly articles and their triples (DOI, PMID, authorship) sit in a separate graph, reachable only inside `SERVICE wdsubgraph:scholarly_articles { … }`; the [SPARQL patterns](references/sparql-patterns.md) show the query and how to read an article's label. For a single DOI or PMID, `wikidata_resolve_external_id` is the shorter route.
+
+Read each SPARQL binding's type and value; a URI, language-tagged literal, and typed literal are different kinds of result. Pass entity URIs from results straight to `wikidata_get_labels` for unresolved display names; it takes them as returned. Keep the IDs even when labels are available.
 
 ## References
 
-- [SPARQL patterns](references/sparql-patterns.md): direct claims, statement nodes, class paths, counts, and pagination.
+- [SPARQL patterns](references/sparql-patterns.md): direct claims, statement nodes, class paths, the scholarly-article graph, counts, and pagination.
 - [Wikidata ranking](https://www.wikidata.org/wiki/Help:Ranking): how rank differs from certainty and chronology.
 - [Wikidata statements](https://www.wikidata.org/wiki/Help:Statements): values, unknown values, and explicit no-value claims.

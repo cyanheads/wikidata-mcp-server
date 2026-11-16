@@ -10,9 +10,11 @@
  */
 
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SparqlResultsScanner } from '@/services/wikidata/sparql-results-scanner.js';
 import {
   prepareQuery,
   toCallerPosition,
@@ -571,6 +573,38 @@ describe('WikidataSparqlService', () => {
       ).rejects.toThrow(/HTML/);
     });
 
+    /** fetch rejects with a TypeError when the endpoint cannot be reached. */
+    it('reports a network failure as ServiceUnavailable, not a raw TypeError', async () => {
+      mockFetch.mockRejectedValue(new TypeError('fetch failed'));
+
+      await expect(
+        makeService().query('SELECT ?x WHERE { ?x ?y ?z }', 'en', 5_000, createMockContext()),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+    });
+
+    it('reports a connection lost mid-body as ServiceUnavailable, not a raw TypeError', async () => {
+      mockFetch.mockImplementation(
+        () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(
+                  new TextEncoder().encode('{"head":{"vars":["i"]},"results":{"bindings":['),
+                );
+              },
+              pull(controller) {
+                controller.error(new TypeError('terminated'));
+              },
+            }),
+            { status: 200 },
+          ),
+      );
+
+      await expect(
+        makeService().query('SELECT ?x WHERE { ?x ?y ?z }', 'en', 5_000, createMockContext()),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+    });
+
     it('preserves caller cancellation instead of misclassifying it as a timeout', async () => {
       mockFetch.mockImplementation(
         (_url: string, init?: RequestInit) =>
@@ -597,6 +631,723 @@ describe('WikidataSparqlService', () => {
       caller.abort();
 
       await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    });
+  });
+
+  describe('query — request and response', () => {
+    it('POSTs the prepared query as a form body to the main Query Service endpoint', async () => {
+      await makeService().query(
+        'SELECT ?x WHERE { ?x ?p ?o } LIMIT 1',
+        'en',
+        5_000,
+        createMockContext(),
+      );
+
+      const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('https://query.wikidata.org/sparql');
+      expect(init.method).toBe('POST');
+      expect(init.headers).toMatchObject({
+        Accept: 'application/sparql-results+json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      });
+      expect(sentQuery()).toContain('SELECT ?x WHERE { ?x ?p ?o } LIMIT 1');
+    });
+
+    it('returns the variables and every binding of a well-formed result', async () => {
+      const bindings = [
+        {
+          item: { type: 'uri', value: 'http://www.wikidata.org/entity/Q42' },
+          label: { type: 'literal', value: 'Douglas "DNA" Adams {}[]\\', 'xml:lang': 'en' },
+        },
+        { item: { type: 'uri', value: 'http://www.wikidata.org/entity/Q1' } },
+      ];
+      mockFetch.mockImplementation(
+        () =>
+          new Response(
+            JSON.stringify({ head: { vars: ['item', 'label'] }, results: { bindings } }, null, 2),
+            { status: 200 },
+          ),
+      );
+
+      const response = await makeService().query(
+        'SELECT ?item ?label WHERE { ?item rdfs:label ?label }',
+        'en',
+        5_000,
+        createMockContext(),
+      );
+
+      expect(response).toMatchObject({ head: { vars: ['item', 'label'] }, results: { bindings } });
+      expect(response.results.bindings).toEqual(bindings);
+    });
+
+    it('surfaces a 5xx as ServiceUnavailable naming the status', async () => {
+      mockFetch.mockImplementation(() => new Response('upstream down', { status: 503 }));
+
+      await expect(
+        makeService().query('SELECT ?x WHERE { ?x ?p ?o }', 'en', 5_000, createMockContext()),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable, data: { status: 503 } });
+    });
+
+    describe('throttling', () => {
+      beforeEach(() => {
+        vi.useFakeTimers();
+      });
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it('retries a 429, honoring Retry-After, then surfaces it as throttled with the hint', async () => {
+        mockFetch.mockImplementation(
+          () => new Response('slow down', { status: 429, headers: { 'Retry-After': '1' } }),
+        );
+
+        const settled = makeService()
+          .query('SELECT ?x WHERE { ?x ?p ?o }', 'en', 5_000, createMockContext())
+          .catch((e: unknown) => e);
+        await vi.advanceTimersByTimeAsync(4_000);
+
+        expect(await settled).toMatchObject({
+          code: JsonRpcErrorCode.RateLimited,
+          data: { reason: 'throttled', retryAfter: '1' },
+        });
+        expect(mockFetch).toHaveBeenCalledTimes(4);
+      });
+    });
+  });
+
+  describe('query — endpoint graph (#49)', () => {
+    it.each([
+      ['no graph', undefined, 'https://query.wikidata.org/sparql'],
+      ['the main graph', { graph: 'main' as const }, 'https://query.wikidata.org/sparql'],
+      [
+        'the scholarly graph',
+        { graph: 'scholarly' as const },
+        'https://query-scholarly.wikidata.org/sparql',
+      ],
+    ])('sends a query for %s to its own endpoint', async (_name, options, url) => {
+      await makeService().query(
+        'SELECT ?x WHERE { ?x ?p ?o } LIMIT 1',
+        'en',
+        5_000,
+        createMockContext(),
+        options,
+      );
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockFetch.mock.calls[0]?.[0]).toBe(url);
+    });
+  });
+
+  /**
+   * `timeoutMs` is one deadline for the whole call: every attempt, every backoff, and every
+   * throttle retry. Before, each attempt got the full timeout of its own, so retries multiplied it.
+   */
+  describe('query — one deadline across retries', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** Records whether, and how, the call has settled. */
+    const track = (pending: Promise<unknown>) => {
+      const state = { settled: false, error: undefined as unknown };
+      pending.then(
+        () => {
+          state.settled = true;
+        },
+        (err: unknown) => {
+          state.settled = true;
+          state.error = err;
+        },
+      );
+      return state;
+    };
+
+    /** Advances fake time by `ms`, then lets the rejection chain run out. */
+    const advance = async (ms: number) => {
+      await vi.advanceTimersByTimeAsync(ms);
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+    };
+
+    /** A fetch that answers only by rejecting with the request signal's reason, as fetch does. */
+    const hang = (_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+
+    it('settles a call throttled on every attempt inside its deadline, as throttled', async () => {
+      mockFetch.mockImplementation(() => new Response('slow down', { status: 429 }));
+
+      const state = track(
+        makeService().query('SELECT ?x WHERE { ?x ?p ?o }', 'en', 5_000, createMockContext()),
+      );
+      await advance(5_000);
+
+      expect(state.settled).toBe(true);
+      expect(state.error).toMatchObject({
+        code: JsonRpcErrorCode.RateLimited,
+        data: { reason: 'throttled' },
+      });
+    });
+
+    it('stops an attempt that follows a throttle at the call deadline, as timeout', async () => {
+      mockFetch
+        .mockImplementationOnce(() => new Response('slow down', { status: 429 }))
+        .mockImplementation(hang);
+
+      const state = track(
+        makeService().query('SELECT ?x WHERE { ?x ?p ?o }', 'en', 5_000, createMockContext()),
+      );
+      await advance(4_999);
+      expect(state.settled).toBe(false);
+      await advance(1);
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(state.settled).toBe(true);
+      expect(state.error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'timeout' },
+      });
+      expect((state.error as Error).message).toContain('5s');
+      // The guidance fits a query that already carries a LIMIT.
+      expect((state.error as Error).message).toContain('Narrow the WHERE clause');
+      expect((state.error as Error).message).not.toContain('Add a LIMIT clause');
+    });
+
+    it('rejects with the caller cancellation during a backoff, never as timeout', async () => {
+      mockFetch.mockImplementation(() => new Response('slow down', { status: 429 }));
+      const caller = new AbortController();
+
+      const state = track(
+        makeService().query(
+          'SELECT ?x WHERE { ?x ?p ?o }',
+          'en',
+          5_000,
+          createMockContext({ signal: caller.signal }),
+        ),
+      );
+      await advance(500);
+      caller.abort();
+      await advance(0);
+
+      expect(state.settled).toBe(true);
+      expect(state.error).toMatchObject({ name: 'AbortError' });
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    /** A body that sends its head, then nothing, until the request signal aborts it. */
+    const stalledBody = (_url: string, init?: RequestInit) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode('{"head":{"vars":["x"]},"results":{"bindings":['),
+            );
+            init?.signal?.addEventListener('abort', () => controller.error(init.signal?.reason), {
+              once: true,
+            });
+          },
+        }),
+        { status: 200 },
+      );
+
+    it('rejects with the caller cancellation during the body read, never as timeout', async () => {
+      mockFetch.mockImplementation(stalledBody);
+      const caller = new AbortController();
+
+      const state = track(
+        makeService().query(
+          'SELECT ?x WHERE { ?x ?p ?o }',
+          'en',
+          5_000,
+          createMockContext({ signal: caller.signal }),
+        ),
+      );
+      await advance(1_000);
+      caller.abort();
+      await advance(0);
+
+      expect(state.settled).toBe(true);
+      expect(state.error).toMatchObject({ name: 'AbortError' });
+    });
+
+    it('stops a body that stalls mid-read at the deadline, as timeout', async () => {
+      mockFetch.mockImplementation(stalledBody);
+
+      const state = track(
+        makeService().query('SELECT ?x WHERE { ?x ?p ?o }', 'en', 5_000, createMockContext()),
+      );
+      await advance(5_000);
+
+      expect(state.settled).toBe(true);
+      expect(state.error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'timeout' },
+      });
+    });
+
+    it('holds every deadline to WIKIDATA_SPARQL_TIMEOUT_MS, the most a SPARQL call waits', async () => {
+      vi.stubEnv('WIKIDATA_SPARQL_TIMEOUT_MS', '3000');
+      vi.resetModules();
+      try {
+        const { WikidataSparqlService: Configured } = await import(
+          '@/services/wikidata/wikidata-sparql-service.js'
+        );
+        mockFetch.mockImplementation(hang);
+
+        const state = track(
+          new Configured({} as AppConfig, {} as StorageService).query(
+            'SELECT ?x WHERE { ?x ?p ?o }',
+            'en',
+            5_000,
+            createMockContext(),
+          ),
+        );
+        await advance(2_999);
+        expect(state.settled).toBe(false);
+        await advance(1);
+
+        expect(state.settled).toBe(true);
+        expect(state.error).toMatchObject({
+          code: JsonRpcErrorCode.Timeout,
+          data: { reason: 'timeout' },
+        });
+        expect((state.error as Error).message).toContain('3s');
+      } finally {
+        vi.unstubAllEnvs();
+        vi.resetModules();
+      }
+    });
+  });
+
+  /** Encodes a JSON text, then splits its bytes into chunks of `size` (1 cuts every seam). */
+  const bytesOf = (text: string, size: number): Uint8Array[] => {
+    const bytes = new TextEncoder().encode(text);
+    const chunks: Uint8Array[] = [];
+    for (let i = 0; i < bytes.length; i += size) chunks.push(bytes.subarray(i, i + size));
+    return chunks;
+  };
+
+  /** A 200 response whose body arrives as the given byte chunks, recording a cancel. */
+  const chunked = (chunks: Uint8Array[], onCancel?: () => void) => {
+    let next = 0;
+    return new Response(
+      new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            const chunk = chunks[next++];
+            if (chunk) controller.enqueue(chunk);
+            else controller.close();
+          },
+          cancel() {
+            onCancel?.();
+          },
+        },
+        { highWaterMark: 0 },
+      ),
+      { status: 200 },
+    );
+  };
+
+  const resultText = (vars: string[], bindings: unknown[]) =>
+    JSON.stringify({ head: { vars }, results: { bindings } }, null, 2);
+
+  const run = (options?: { maxRows?: number }) =>
+    makeService().query(
+      'SELECT ?i WHERE { ?i wdt:P31 wd:Q515 } LIMIT 5000',
+      'en',
+      5_000,
+      createMockContext(),
+      options,
+    );
+
+  const uriRow = (i: number) => ({
+    i: { type: 'uri', value: `http://www.wikidata.org/entity/Q${i}` },
+  });
+
+  /**
+   * #51: with `maxRows`, the service reads the result one binding at a time, stops after
+   * `maxRows + 1`, and aborts the request — so a result past the ceiling is never read whole.
+   */
+  describe('query — bounded read (#51)', () => {
+    /**
+     * A body that never ends on its own: one binding per read, as many as are asked for. It
+     * errors past HARD_STOP, so a reader that ignores `maxRows` fails instead of hanging.
+     */
+    const HARD_STOP = 20_000;
+    const endlessBody = () => {
+      const encoder = new TextEncoder();
+      const counts = { rows: 0, cancelled: 0 };
+      const response = new Response(
+        new ReadableStream<Uint8Array>(
+          {
+            start(controller) {
+              controller.enqueue(encoder.encode('{"head":{"vars":["i"]},"results":{"bindings":['));
+            },
+            pull(controller) {
+              if (counts.rows >= HARD_STOP) {
+                controller.error(new Error(`read past ${HARD_STOP} bindings`));
+                return;
+              }
+              counts.rows++;
+              const row = JSON.stringify(uriRow(counts.rows));
+              controller.enqueue(encoder.encode(counts.rows === 1 ? row : `,${row}`));
+            },
+            cancel() {
+              counts.cancelled++;
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+        { status: 200 },
+      );
+      return { response, counts };
+    };
+
+    it('reads an endless body to 4,001 bindings, aborts it, and returns the first 4,000', async () => {
+      const { response, counts } = endlessBody();
+      mockFetch.mockImplementation(() => response);
+
+      const result = await run({ maxRows: 4_000 });
+
+      expect(result.stoppedEarly).toBe(true);
+      expect(result.head.vars).toEqual(['i']);
+      expect(result.results.bindings).toHaveLength(4_000);
+      expect(result.results.bindings.at(-1)).toEqual(uriRow(4_000));
+      expect(counts.rows).toBeGreaterThanOrEqual(4_001);
+      expect(counts.rows).toBeLessThanOrEqual(4_002);
+      expect(counts.cancelled).toBe(1);
+    });
+
+    it.each([
+      [3, 3, false, 3],
+      [3, 4, true, 3],
+      [3, 0, false, 0],
+      [1, 2, true, 1],
+    ])(
+      'with maxRows %i, a %i-row result is stoppedEarly=%s with %i rows',
+      async (maxRows, rows, stoppedEarly, returned) => {
+        const bindings = Array.from({ length: rows }, (_, i) => uriRow(i + 1));
+        mockFetch.mockImplementation(() => chunked(bytesOf(resultText(['i'], bindings), 7)));
+
+        const result = await run({ maxRows });
+
+        expect(result.stoppedEarly).toBe(stoppedEarly);
+        expect(result.results.bindings).toEqual(bindings.slice(0, returned));
+      },
+    );
+
+    it('returns every row, not stopped early, when no maxRows is given', async () => {
+      const bindings = Array.from({ length: 5_000 }, (_, i) => uriRow(i + 1));
+      mockFetch.mockImplementation(() => chunked(bytesOf(resultText(['i'], bindings), 4_096)));
+
+      const result = await run();
+
+      expect(result.stoppedEarly).toBe(false);
+      expect(result.results.bindings).toEqual(bindings);
+    });
+
+    /** The read also stops at 8 MiB of body, whatever the row count, and the call fails. */
+    it('stops a body past 8 MiB, aborts it, and rejects as result_too_large', async () => {
+      const encoder = new TextEncoder();
+      const value = 'x'.repeat(64 * 1024);
+      const counts = { rows: 0, cancelled: 0 };
+      const response = new Response(
+        new ReadableStream<Uint8Array>(
+          {
+            start(controller) {
+              controller.enqueue(encoder.encode('{"head":{"vars":["s"]},"results":{"bindings":['));
+            },
+            pull(controller) {
+              if (counts.rows >= 1_000) {
+                controller.error(new Error('read past 1,000 bindings'));
+                return;
+              }
+              counts.rows++;
+              const row = JSON.stringify({ s: { type: 'literal', value } });
+              controller.enqueue(encoder.encode(counts.rows === 1 ? row : `,${row}`));
+            },
+            cancel() {
+              counts.cancelled++;
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+        { status: 200 },
+      );
+      mockFetch.mockImplementation(() => response);
+
+      const err = await run({ maxRows: 4_000 }).catch((e: unknown) => e);
+      expect(err).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'result_too_large', limitBytes: 8 * 1024 * 1024 },
+      });
+      expect((err as Error).message).toContain('8 MiB');
+      // The read stops on the row that carries the body past the ceiling.
+      expect(counts.rows).toBeGreaterThanOrEqual(128);
+      expect(counts.rows).toBeLessThanOrEqual(129);
+      expect(counts.cancelled).toBe(1);
+    });
+  });
+
+  /**
+   * The incremental read must give the same rows JSON.parse would, wherever the chunk seams fall
+   * and whatever layout or member order the document uses.
+   */
+  describe('query — incremental read fidelity', () => {
+    const tricky = [
+      {
+        item: { type: 'uri', value: 'http://www.wikidata.org/entity/Q42' },
+        label: {
+          type: 'literal',
+          value: 'brace } bracket ] quote " backslash \\ "}]" é中😀 \u0000 \n\r\t',
+          'xml:lang': 'en',
+        },
+      },
+      {},
+      {
+        deep: {
+          type: 'literal',
+          value: 'x',
+          nested: { a: [1, [2, { k: '}' }], { '': '"' }], b: null, c: true, d: -1.5e3 },
+        },
+      },
+    ];
+
+    it.each([1, 2, 3, 5, 64])(
+      'reads a document split into %i-byte chunks exactly as JSON.parse does',
+      async (size) => {
+        const text = resultText(['item', 'label', 'deep'], tricky);
+        mockFetch.mockImplementation(() => chunked(bytesOf(text, size)));
+
+        const result = await run();
+
+        expect(result.head).toEqual({ vars: ['item', 'label', 'deep'] });
+        expect(result.results.bindings).toEqual(tricky);
+      },
+    );
+
+    it.each([
+      [
+        'a compact layout',
+        JSON.stringify({ head: { vars: ['x'] }, results: { bindings: [uriRow(1)] } }),
+      ],
+      [
+        'CRLF line breaks and tabs between every token',
+        JSON.stringify({ head: { vars: ['x'] }, results: { bindings: [uriRow(1)] } }, null, '\t')
+          .split('\n')
+          .join('\r\n'),
+      ],
+      [
+        'results before head, and members the format does not define',
+        JSON.stringify({
+          results: { distinct: false, bindings: [uriRow(1)], ordered: true },
+          head: { link: [], vars: ['x'] },
+          extra: { bindings: [{ not: 'a row' }] },
+        }),
+      ],
+      [
+        'escaped member names',
+        '{"he\\u0061d":{"vars":["x"]},"r\\u0065sults":{"b\\u0069ndings":[{"i":{"type":"uri","value":"http://www.wikidata.org/entity/Q1"}}]}}',
+      ],
+    ])('reads %s', async (_name, text) => {
+      mockFetch.mockImplementation(() => chunked(bytesOf(text, 3)));
+
+      const result = await run();
+
+      expect(result.head.vars).toEqual(['x']);
+      expect(result.results.bindings).toEqual([uriRow(1)]);
+      expect(result.stoppedEarly).toBe(false);
+    });
+
+    it('reads an empty bindings array', async () => {
+      mockFetch.mockImplementation(() => chunked(bytesOf(resultText(['x'], []), 2)));
+
+      const result = await run({ maxRows: 10 });
+
+      expect(result).toMatchObject({ head: { vars: ['x'] }, results: { bindings: [] } });
+      expect(result.stoppedEarly).toBe(false);
+    });
+  });
+
+  /**
+   * #51: when a query passes WDQS's 60 s limit after rows have started streaming, the Query
+   * Service still answers HTTP 200 and appends its exception trailer to the partial JSON. That
+   * is a timeout, never a partial result.
+   */
+  describe('query — incomplete 200 bodies', () => {
+    const head =
+      '{\n  "head" : {\n    "vars" : [ "i" ]\n  },\n  "results" : {\n    "bindings" : [ ';
+    const row = (i: number) =>
+      `{\n      "i" : {\n        "type" : "uri",\n        "value" : "http://www.wikidata.org/entity/Q${i}"\n      }\n    }`;
+    const trailer =
+      'SPARQL-QUERY: queryStr=SELECT ?i WHERE { ?i wdt:P31 wd:Q515 . FILTER(?i != "}") } LIMIT 5000\njava.util.concurrent.TimeoutException\n\tat java.util.concurrent.FutureTask.get(FutureTask.java:205)\n\tat com.bigdata.rdf.sail.webapp.BigdataServlet.submitApiTask(BigdataServlet.java:292)\n';
+
+    it.each([
+      [
+        'inside a binding',
+        `${head}${row(1)}, {\n      "i" : {\n        "type" : "uri",\n        "value" : "http://www.wikidata.org/entity/Q${trailer}`,
+      ],
+      ['between bindings', `${head}${row(1)}, ${row(2)}, ${trailer}`],
+      ['after a complete document', `${head}${row(1)} ]\n  }\n}${trailer}`],
+    ])('reports the trailer %s as a timeout, returning no rows', async (_name, text) => {
+      mockFetch.mockImplementation(() => chunked(bytesOf(text, 16)));
+
+      const err = await run({ maxRows: 4_000 }).catch((e: unknown) => e);
+
+      expect(err).toMatchObject({ code: JsonRpcErrorCode.Timeout, data: { reason: 'timeout' } });
+      expect((err as Error).message).toContain('60s');
+      expect((err as Error).message).toContain('Narrow the WHERE clause');
+      expect((err as Error).message).not.toContain('Add a LIMIT clause');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    const marker = 'java.util.concurrent.TimeoutException';
+
+    it.each([
+      ['inside the marker', 'java.util.'.length],
+      ['before its last character', marker.length - 1],
+    ])('finds the trailer when a chunk seam splits it %s', async (_name, into) => {
+      const text = `${head}${row(1)}, ${trailer}`;
+      const cut = text.indexOf(marker) + into;
+      const encoder = new TextEncoder();
+      mockFetch.mockImplementation(() =>
+        chunked([encoder.encode(text.slice(0, cut)), encoder.encode(text.slice(cut))]),
+      );
+
+      await expect(run()).rejects.toMatchObject({ data: { reason: 'timeout' } });
+    });
+
+    it('returns a capped result when the read stops before a trailer', async () => {
+      const text = `${head}${[1, 2, 3, 4].map(row).join(', ')}, ${trailer}`;
+      mockFetch.mockImplementation(() => chunked(bytesOf(text, 16)));
+
+      const result = await run({ maxRows: 2 });
+
+      expect(result.stoppedEarly).toBe(true);
+      expect(result.results.bindings).toEqual([uriRow(1), uriRow(2)]);
+    });
+
+    it.each([
+      ['ends mid-binding', `${head}${row(1)}, {\n      "i" : {\n        "type" : "uri",\n`],
+      ['ends after a binding', `${head}${row(1)}, `],
+      ['carries text after the document', `${head}${row(1)} ]\n  }\n} trailing`],
+      ['holds a binding that is not an object', `${head}${row(1)}, [ 1, 2 ] ]\n  }\n}`],
+      ['holds a binding value that is not a term', `${head}{ "i": "Q1" } ]\n  }\n}`],
+      ['holds a term without a value', `${head}{ "i": { "type": "uri" } } ]\n  }\n}`],
+      [
+        'holds a term whose value is not a string',
+        `${head}{ "i": { "type": "uri", "value": 7 } } ]\n  }\n}`,
+      ],
+      ['has no head', '{ "results" : { "bindings" : [ ] } }'],
+      ['has a head without vars', '{ "head" : { }, "results" : { "bindings" : [ ] } }'],
+      [
+        'has a head whose vars are not strings',
+        '{ "head" : { "vars" : [ 1 ] }, "results" : { "bindings" : [ ] } }',
+      ],
+      ['has no results', '{ "head" : { "vars" : [ "x" ] } }'],
+      ['has results without bindings', '{ "head" : { "vars" : [ "x" ] }, "results" : { } }'],
+      [
+        'has a results member that is not an object',
+        '{ "head" : { "vars" : [ "x" ] }, "results" : [ ] }',
+      ],
+      [
+        'has a bindings member that is not an array',
+        '{ "head" : { "vars" : [ "x" ] }, "results" : { "bindings" : { } } }',
+      ],
+      ['is empty', ''],
+    ])('reports a body that %s as ServiceUnavailable, returning no rows', async (_name, text) => {
+      mockFetch.mockImplementation(() => chunked(bytesOf(text, 16)));
+
+      await expect(run()).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+    });
+
+    it('rejects an HTML page delivered in chunks as HTML', async () => {
+      mockFetch.mockImplementation(() =>
+        chunked(bytesOf('\n<!DOCTYPE html><html><body>Too many requests</body></html>', 4)),
+      );
+
+      await expect(run()).rejects.toThrow(/HTML/);
+    });
+  });
+
+  /**
+   * A 400 or 422 with no Blazegraph exception line comes from a proxy in front of the Query
+   * Service. An HTML page there is the proxy's error page, never a report on the query, so it is
+   * ServiceUnavailable — which `wikidata_resolve_external_id` reads as that graph being down.
+   */
+  describe('query — 400 pages with no exception line', () => {
+    const failWith = async (body: string, status = 400) => {
+      mockFetch.mockImplementation(() => new Response(body, { status }));
+      return (await makeService()
+        .query('SELECT ?x WHERE { ?x ?p ?o }', 'en', 5_000, createMockContext())
+        .catch((e: unknown) => e)) as {
+        code: number;
+        message: string;
+        data: { reason?: string; cause?: string; status?: number };
+      };
+    };
+
+    it.each([400, 422])(
+      'reports an HTML page sent with %i as ServiceUnavailable, by its title, never its markup',
+      async (status) => {
+        const err = await failWith(
+          '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8"><title>Wikimedia\n  Error: 400 Bad Request</title><style>body{}</style></head><body><h1>Error</h1><p>Request <b>rejected</b>.</p></body></html>',
+          status,
+        );
+
+        expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(err.data.reason).toBeUndefined();
+        expect(err.data.status).toBe(status);
+        expect(err.message).toContain('Wikimedia Error: 400 Bad Request');
+        expect(err.message).not.toContain('<');
+        expect(err.message).not.toContain('parse error');
+      },
+    );
+
+    it.each([
+      ['an HTML page with no title', '<html><body><h1>Bad Request</h1></body></html>'],
+      ['an HTML fragment', '  <body><p>Bad <b>Request</b></p></body>'],
+      ['an empty title', '<html><head><title>  </title></head></html>'],
+      ['an unclosed title', '<html><head><title>Bad'],
+    ])('reports %s as ServiceUnavailable naming the bare status', async (_name, body) => {
+      const err = await failWith(body);
+
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.message).toContain('HTTP 400');
+      expect(err.message).not.toContain('<');
+    });
+
+    it('reads an exception line as a parse error even inside markup', async () => {
+      const err = await failWith(
+        '<pre>org.openrdf.query.MalformedQueryException: Encountered "}" at line 1, column 9.</pre>',
+      );
+
+      expect(err.data.reason).toBe('parse_error');
+    });
+
+    it('reports an empty body as a parse error naming the bare status', async () => {
+      const err = await failWith('');
+
+      expect(err.data.reason).toBe('parse_error');
+      expect(err.data.cause).toBe('HTTP 400');
+      expect(err.message).toBe('SPARQL parse error: HTTP 400');
+    });
+
+    it('keeps the first 200 characters of a plain-text body', async () => {
+      const err = await failWith(`Query is too long. ${'x'.repeat(300)}`);
+
+      expect(err.data.reason).toBe('parse_error');
+      expect(err.data.cause).toBe(`Query is too long. ${'x'.repeat(181)}`);
+    });
+
+    it('keeps the first 200 characters of a page title', async () => {
+      const err = await failWith(`<html><head><title>${'T'.repeat(300)}</title></head></html>`);
+
+      expect(err.message).toContain('T'.repeat(200));
+      expect(err.message).not.toContain('T'.repeat(201));
     });
   });
 
@@ -655,6 +1406,164 @@ describe('WikidataSparqlService', () => {
       (_name, build) => {
         expectBoundedScan(build, (input) => toCallerPosition(input, prepared));
       },
+    );
+  });
+
+  /**
+   * The response scans run over upstream-sized text: the incremental results scanner (with its
+   * timeout-trailer search) on every 200 body, and the title lookup on a 400 page. Each input
+   * doubles from 5k to 320k characters. At every size the least growth over a 5k baseline,
+   * re-timed beside it in each of several rounds, stays under 4× the size ratio (256 across the
+   * whole 64× span), and the least CPU time per scan stays under an absolute bound — both in this
+   * thread's own CPU time, so a descheduled worker never reads as a slow scan.
+   */
+  describe('response scan cost', () => {
+    const BASE = 5_000;
+    const ROUNDS = 5;
+    /** Calls per timing of the 5k input, whose single scan sits near the timer's resolution. */
+    const BATCH = 32;
+    /** Per-character CPU budget plus a fixed allowance, in µs — ten times the slowest measured scan. */
+    const boundUs = (size: number) => size * 0.25 + 1_000;
+
+    const cpuUs = (): number => {
+      const { user, system } = process.threadCpuUsage();
+      return user + system;
+    };
+
+    /** Doubles the input from BASE to 64 × BASE, checking both bounds at each size before the next. */
+    async function expectLinear(
+      build: (size: number) => string,
+      scanOnce: (input: string) => unknown,
+      batch: number,
+    ): Promise<void> {
+      const timeEach = async (input: string, calls: number) => {
+        const start = cpuUs();
+        for (let i = 0; i < calls; i++) await scanOnce(input);
+        return (cpuUs() - start) / calls;
+      };
+      const base = build(BASE);
+      await timeEach(base, batch);
+      for (let size = BASE * 2; size <= BASE * 64; size *= 2) {
+        const input = build(size);
+        let growth = Number.POSITIVE_INFINITY;
+        let least = Number.POSITIVE_INFINITY;
+        for (let round = 0; round < ROUNDS; round++) {
+          const baseUs = await timeEach(base, batch);
+          const sizeUs = await timeEach(input, Math.max(1, Math.round((batch * BASE) / size)));
+          least = Math.min(least, sizeUs);
+          growth = Math.min(growth, sizeUs / Math.max(baseUs, 1));
+        }
+        expect(growth, `growth from ${BASE} to ${size} characters`).toBeLessThan((4 * size) / BASE);
+        expect(least, `CPU µs per scan of ${size} characters`).toBeLessThan(boundUs(size));
+      }
+    }
+
+    const OPEN = '{"head":{"vars":["x"]},"results":{"bindings":[';
+    /** `unit` repeated to about `size` characters after `prefix`. */
+    const fill = (prefix: string, unit: string, size: number, suffix = '') =>
+      `${prefix}${unit.repeat(Math.max(1, Math.floor((size - prefix.length) / unit.length)))}${suffix}`;
+
+    it.each<[string, (size: number) => string]>([
+      [
+        'bindings on one long line ending in a break',
+        (n) => fill(OPEN, '{"x":{"type":"literal","value":"§1 x"}},', n, '{}]}}\ny'),
+      ],
+      [
+        'CRLF and spaces between every token',
+        (n) =>
+          fill(
+            `{  \r\n"head"  \r\n:  \r\n{"vars":["x"]}  \r\n,  \r\n"results"  \r\n:  \r\n{  \r\n"bindings"  \r\n:  \r\n[  \r\n`,
+            '{}  \r\n,  \r\n',
+            n,
+            '{}]}}',
+          ),
+      ],
+      [
+        'a string value of one long line ending in a break',
+        (n) => fill(`${OPEN}{"x":{"type":"literal","value":"`, '§1 x', n, '\ny'),
+      ],
+      [
+        'a string value of breaks throughout',
+        (n) => fill(`${OPEN}{"x":{"type":"literal","value":"`, '  \r\n', n),
+      ],
+      ['nested openers with no closer in a row', (n) => fill(`${OPEN}{"a":`, '[', n)],
+      ['nested objects with no closer in a skipped member', (n) => fill('{"x":', '{"x":', n)],
+      [
+        'escaped quotes in a row value',
+        (n) => fill(`${OPEN}{"x":{"type":"literal","value":"`, '\\"', n, '"}}]}}'),
+      ],
+      ['a backslash run in a row value', (n) => fill(`${OPEN}{"x":{"value":"`, '\\', n)],
+      ['short strings in a skipped member', (n) => fill('{"x":[', '"a",', n, '"a"]}')],
+      ['one long key with no closing quote', (n) => fill('{"', 'a', n)],
+      ['many skipped root members', (n) => fill('{', '"k":0,', n, '"k":0}')],
+      ['a long digit run', (n) => fill('{"x":', '1', n, '}')],
+      [
+        'near misses of the timeout trailer',
+        (n) => fill(`${OPEN}{}, `, 'java.util.concurrent.Timeout ', n),
+      ],
+    ])(
+      'the results scanner over %s stays linear from 5k to 320k characters',
+      async (_name, build) => {
+        await expectLinear(
+          build,
+          (input) => {
+            const scanner = new SparqlResultsScanner(4_000);
+            scanner.push(input);
+            return scanner.finish();
+          },
+          BATCH,
+        );
+      },
+      0,
+    );
+
+    it.each<[string, (size: number) => string]>([
+      [
+        'bindings on one long line ending in a break',
+        (n) => fill(OPEN, '{"x":{"type":"literal","value":"§1 x"}},', n, '{}]}}\ny'),
+      ],
+      ['near misses of the timeout trailer', (n) => fill(OPEN, 'java.util.concurrent.Timeout ', n)],
+    ])(
+      'the results scanner over %s, pushed in 1,000-character chunks, stays linear',
+      async (_name, build) => {
+        await expectLinear(
+          build,
+          (input) => {
+            const scanner = new SparqlResultsScanner();
+            for (let i = 0; i < input.length; i += 1_000) scanner.push(input.slice(i, i + 1_000));
+            return scanner.finish();
+          },
+          BATCH,
+        );
+      },
+      0,
+    );
+
+    /** Through `query()`, one call per measurement: the 400 path reads the body as a whole. */
+    const parseFailure = (body: string) => {
+      mockFetch.mockImplementation(() => Promise.resolve(new Response(body, { status: 400 })));
+      return makeService()
+        .query('SELECT ?x WHERE { ?x ?p ?o }', 'en', 5_000, createMockContext())
+        .catch((e: unknown) => e);
+    };
+
+    it.each<[string, (size: number) => string]>([
+      ['title openers with no closing bracket', (n) => fill('<html>', '<title', n)],
+      ['an unclosed title', (n) => fill('<html><title>', 'a', n)],
+      ['near misses of the closing tag', (n) => fill('<html><title>', '</titl', n)],
+      [
+        'a title of one long line ending in a break',
+        (n) => fill('<title>', '§1 x', n, '\ny</title>'),
+      ],
+      ['a title of breaks throughout', (n) => fill('<title>', '  \r\n', n, 'x</title>')],
+      ['a run of tag openers', (n) => fill('', '<', n)],
+      ['near misses of the exception line', (n) => fill('', 'Exceptio', n)],
+    ])(
+      'the 400 page title lookup over %s stays linear from 5k to 320k characters',
+      async (_name, build) => {
+        await expectLinear(build, parseFailure, 1);
+      },
+      30_000,
     );
   });
 });

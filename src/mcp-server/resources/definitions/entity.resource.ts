@@ -18,9 +18,7 @@ import {
 export const wikidataEntityResource = resource('wikidata://entity/{id}', {
   name: 'wikidata-entity',
   description:
-    'Wikidata entity by QID or PID — labels (all languages), English description, ' +
-    'and a summary of key properties (instance-of P31, image P18, enwiki sitelink). ' +
-    'Formatted as compact markdown. For full entity data, use the wikidata_get_entity tool.',
+    'Wikidata entity by QID or PID — its English label and description, the number of languages it has a label in with a sample of five, and a summary of key properties (instance-of P31, image P18, enwiki sitelink, the number of properties with statements). Formatted as compact markdown. For every label and the full entity data, use the wikidata_get_entity tool.',
   mimeType: 'text/markdown',
   params: z.object({
     id: z.string().describe('Q-ID (e.g., "Q76") or P-ID (e.g., "P31") of the entity.'),

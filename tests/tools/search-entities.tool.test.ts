@@ -3,9 +3,10 @@
  * @module tests/tools/search-entities.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataSearchEntities } from '@/mcp-server/tools/definitions/search-entities.tool.js';
 
 const mockSearch = vi.fn();
@@ -137,8 +138,190 @@ describe('wikidataSearchEntities', () => {
     expect(mockSearch).toHaveBeenCalledWith('test', 'item', 'en', 20, 40, expect.anything());
   });
 
-  it('input validation: limit above maximum (51) is rejected by Zod', () => {
-    expect(() => wikidataSearchEntities.input.parse({ query: 'test', limit: 51 })).toThrow();
+  /**
+   * #53: the endpoint returns no total and a short page is not the end, so `nextOffset` marks
+   * where to continue; the walk ends at an empty page or a page with no `nextOffset`.
+   */
+  describe('pagination and the per-call cap', () => {
+    type SearchStructured = {
+      results: unknown[];
+      shown: number;
+      cap: number;
+      truncated?: boolean;
+      nextOffset?: number;
+      notice?: string;
+    };
+    const call = (args: Record<string, unknown>) =>
+      runToolContract(wikidataSearchEntities, args as never);
+    const structuredOf = (result: { structuredContent?: unknown }) =>
+      result.structuredContent as SearchStructured;
+    const textOf = (result: { content: unknown[] }) =>
+      result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    /** `n` ranked hits, the shape the REST search endpoint returns. */
+    const hits = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        id: `Q${i + 1}`,
+        'display-label': { language: 'en', value: `hit ${i + 1}` },
+        match: { type: 'label', language: 'en' },
+      }));
+
+    it('a full page carries nextOffset, truncated, shown, cap, and a notice naming nextOffset', async () => {
+      mockSearch.mockResolvedValue(hits(50));
+
+      const result = await call({ query: 'Douglas Adams', limit: 50 });
+
+      const structured = structuredOf(result);
+      expect(structured).toMatchObject({ nextOffset: 50, truncated: true, shown: 50, cap: 50 });
+      expect(structured.notice).toContain('offset 50');
+      expect(structured.notice).not.toMatch(/raise the cap/i);
+      const text = textOf(result);
+      expect(text).toContain('**nextOffset:** 50');
+      expect(text).toContain('offset 50');
+    });
+
+    it('a short page carries nextOffset at offset + limit, never offset + results', async () => {
+      mockSearch.mockResolvedValue(hits(49));
+
+      const result = await call({ query: 'date', type: 'property', limit: 50, offset: 300 });
+
+      const structured = structuredOf(result);
+      expect(structured.nextOffset).toBe(350);
+      expect(structured.truncated).toBeUndefined();
+      expect(structured.notice).toBeUndefined();
+      expect(textOf(result)).toContain('**nextOffset:** 350');
+    });
+
+    it('walks 50 → 16 → none, ending at the empty page with an end-of-results notice', async () => {
+      mockSearch.mockResolvedValueOnce(hits(16)).mockResolvedValueOnce([]);
+
+      const second = await call({ query: 'Douglas Adams', limit: 50, offset: 50 });
+      expect(structuredOf(second).nextOffset).toBe(100);
+
+      const past = await call({ query: 'Douglas Adams', limit: 50, offset: 100 });
+      const structured = structuredOf(past);
+      expect(structured.nextOffset).toBeUndefined();
+      expect(structured.notice).toContain('offset 100');
+      expect(structured.notice).not.toMatch(/matched|broader/i);
+      expect(textOf(past)).toContain('offset 100');
+    });
+
+    it('keeps the zero-match notice for an empty first page (#11)', async () => {
+      mockSearch.mockResolvedValue([]);
+
+      const result = await call({ query: 'xyzzy' });
+
+      expect(result.isError).toBeFalsy();
+      expect(structuredOf(result).notice).toBe(
+        'No items matched "xyzzy" in language "en". Try broader terms or a different language code.',
+      );
+      expect(structuredOf(result).nextOffset).toBeUndefined();
+    });
+
+    it('stops nextOffset at the 10,000-result window, saying so', async () => {
+      mockSearch.mockResolvedValue(hits(10));
+
+      const result = await call({ query: 'john', limit: 20, offset: 9_990 });
+
+      const structured = structuredOf(result);
+      expect(structured.nextOffset).toBeUndefined();
+      expect(structured.notice).toContain('first 10,000 results');
+      expect(textOf(result)).toContain('first 10,000 results');
+    });
+
+    it('rejects offset 10,000 as invalid arguments before any upstream request', async () => {
+      const result = await call({ query: 'john', offset: 10_000 });
+
+      expect(result.isError).toBe(true);
+      expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
+        JsonRpcErrorCode.InvalidParams,
+      );
+      expect(mockSearch).not.toHaveBeenCalled();
+    });
+
+    it.each([51, 500])('sends limit %i upstream unchanged', async (limit) => {
+      mockSearch.mockResolvedValue([]);
+
+      const result = await call({ query: 'john', limit });
+
+      expect(mockSearch).toHaveBeenCalledWith('john', 'item', 'en', limit, 0, expect.anything());
+      expect(structuredOf(result).cap).toBe(limit);
+    });
+
+    it('serves limit 501 at 500, reporting cap 500 and a notice naming both', async () => {
+      mockSearch.mockResolvedValue(hits(120));
+
+      const result = await call({ query: 'john', limit: 501 });
+
+      expect(mockSearch).toHaveBeenCalledWith('john', 'item', 'en', 500, 0, expect.anything());
+      const structured = structuredOf(result);
+      expect(structured.cap).toBe(500);
+      expect(structured.nextOffset).toBe(500);
+      expect(structured.notice).toContain('501');
+      expect(structured.notice).toContain('500');
+      expect(textOf(result)).toContain('501');
+    });
+
+    it('joins the clamp, full-page, and window-end notices into one', async () => {
+      mockSearch.mockResolvedValue(hits(500));
+
+      const result = await call({ query: 'john', limit: 501, offset: 9_500 });
+
+      const structured = structuredOf(result);
+      expect(structured).toMatchObject({ truncated: true, shown: 500, cap: 500 });
+      expect(structured.nextOffset).toBeUndefined();
+      const notice = structured.notice ?? '';
+      expect(notice).toContain('501');
+      expect(notice).toContain('filled');
+      expect(notice).toContain('first 10,000 results');
+      for (const line of notice.split('\n')) expect(textOf(result)).toContain(line);
+    });
+
+    it('carries nextOffset and the notice on both surfaces for a property search', async () => {
+      mockSearch.mockResolvedValue(hits(10));
+
+      const result = await call({ query: 'date', type: 'property' });
+
+      expect(mockSearch).toHaveBeenCalledWith('date', 'property', 'en', 10, 0, expect.anything());
+      expect(structuredOf(result)).toMatchObject({ nextOffset: 10, truncated: true });
+      expect(textOf(result)).toContain('**nextOffset:** 10');
+      expect(textOf(result)).toContain(structuredOf(result).notice ?? 'missing notice');
+    });
+
+    /** Zod 4 `.int()` advertises the safe-integer bound as `maximum`; no cap rides with it. */
+    it('advertises limit with no cap as its maximum and offset with maximum 9999', () => {
+      const schema = z.toJSONSchema(wikidataSearchEntities.input, { io: 'input' }) as {
+        properties: Record<string, { minimum?: number; maximum?: number; default?: unknown }>;
+      };
+
+      expect(schema.properties.limit).toMatchObject({ minimum: 1, default: 10 });
+      expect(schema.properties.limit?.maximum ?? Number.MAX_SAFE_INTEGER).toBe(
+        Number.MAX_SAFE_INTEGER,
+      );
+      expect(schema.properties.offset).toMatchObject({ minimum: 0, maximum: 9999 });
+    });
+
+    describe('with WIKIDATA_CLAMP_LIMITS=false', () => {
+      afterEach(() => {
+        vi.unstubAllEnvs();
+      });
+
+      it('rejects limit 501 naming 500, before any upstream request', async () => {
+        vi.stubEnv('WIKIDATA_CLAMP_LIMITS', 'false');
+        vi.resetModules();
+        const { wikidataSearchEntities: fresh } = await import(
+          '@/mcp-server/tools/definitions/search-entities.tool.js'
+        );
+
+        const result = await runToolContract(fresh, { query: 'john', limit: 501 } as never);
+
+        expect(result.isError).toBe(true);
+        const error = (result.structuredContent as { error: { code: number; message: string } })
+          .error;
+        expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(error.message).toContain('500');
+        expect(mockSearch).not.toHaveBeenCalled();
+      });
+    });
   });
 
   it('input validation: limit below minimum (0) is rejected by Zod', () => {

@@ -152,7 +152,7 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
       .string()
       .min(1)
       .describe(
-        'Q-ID (e.g., "Q76") or P-ID (e.g., "P31"). Case-insensitive — normalized to uppercase.',
+        'Q-ID (e.g., "Q76") or P-ID (e.g., "P31"), bare or as an entity URI or wd: form (e.g., "http://www.wikidata.org/entity/Q76", "wd:Q76"). Case-insensitive — normalized to uppercase.',
       ),
     fields: z
       .array(FIELD_ENUM)

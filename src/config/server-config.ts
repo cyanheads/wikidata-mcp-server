@@ -17,12 +17,18 @@ const ServerConfigSchema = z.object({
     .number()
     .default(55_000)
     .describe(
-      'Max time to wait for a SPARQL response in milliseconds. Default: 55000 (just under the 60s hard server limit).',
+      'Max time to wait for a SPARQL response in milliseconds, retries included. It caps every call, including a wikidata_sparql_query timeout asked for, and is itself held to 55000. Default: 55000 (just under the 60s hard server limit).',
     ),
   restTimeoutMs: z.coerce
     .number()
     .default(10_000)
     .describe('Max time to wait for REST API responses in milliseconds. Default: 10000.'),
+  clampLimits: z
+    .stringbool()
+    .default(true)
+    .describe(
+      'Serve a count above its per-call cap at the cap, with a notice. false rejects it instead, naming the cap. Default: true.',
+    ),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
@@ -33,6 +39,7 @@ export function getServerConfig() {
     userAgent: 'WIKIDATA_USER_AGENT',
     sparqlTimeoutMs: 'WIKIDATA_SPARQL_TIMEOUT_MS',
     restTimeoutMs: 'WIKIDATA_REST_TIMEOUT_MS',
+    clampLimits: 'WIKIDATA_CLAMP_LIMITS',
   });
   return _config;
 }

@@ -9,7 +9,7 @@ const encoder = new TextEncoder();
  * Byte length of `text` as UTF-8 on the wire. `String.prototype.length` counts UTF-16 code
  * units, which undercounts non-Latin text up to threefold (one CJK character is 1 unit, 3 bytes).
  */
-export function utf8Bytes(text: string): number {
+function utf8Bytes(text: string): number {
   return encoder.encode(text).length;
 }
 

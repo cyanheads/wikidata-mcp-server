@@ -1050,4 +1050,17 @@ describe('wikidataGetEntity', () => {
       },
     );
   });
+
+  /** #55: the entity URI a wikidata_sparql_query result carries is accepted as the ID. */
+  it('accepts an entity URI as the ID and fetches the bare Q-ID', async () => {
+    mockFetchEntity.mockResolvedValue({ ...mockEntity, id: 'Q42' });
+
+    const result = await runToolContract(wikidataGetEntity, {
+      id: 'http://www.wikidata.org/entity/Q42',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockFetchEntity).toHaveBeenCalledWith('Q42', expect.anything(), undefined);
+    expect(result.structuredContent).toMatchObject({ id: 'Q42' });
+  });
 });

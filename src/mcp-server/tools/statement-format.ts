@@ -27,13 +27,21 @@ const TIME_PRECISION: Record<number, string> = {
   14: 'second',
 };
 
+/** P-ID → label, for the properties a statement set names. */
+type PropertyLabels = Record<string, string>;
+
 /** The complete human-readable representation, before Markdown encoding. */
-function statementValueText(value: NormalizedStatement['value']): string {
+function statementValueText(
+  value: NormalizedStatement['value'],
+  propertyLabels: PropertyLabels | undefined,
+): string {
   switch (value.type) {
     case 'wikibase-item':
       return value.label ? `${value.label} (${value.qid})` : value.qid;
-    case 'entity-id':
-      return value.id;
+    case 'entity-id': {
+      const label = value.entityType === 'property' ? propertyLabels?.[value.id] : undefined;
+      return label ? `${label} (${value.id})` : value.id;
+    }
     case 'time': {
       const name = TIME_PRECISION[value.precision];
       return `${value.time} (precision ${value.precision}${name ? `: ${name}` : ''})`;
@@ -69,36 +77,54 @@ function statementValueText(value: NormalizedStatement['value']): string {
 }
 
 /** One statement value as literal text or a safe URL link. */
-function formatStatementValue(value: NormalizedStatement['value']): string {
+function formatStatementValue(
+  value: NormalizedStatement['value'],
+  propertyLabels: PropertyLabels | undefined,
+): string {
   return value.type === 'url'
     ? markdownLink(value.value, value.value)
-    : escapeMarkdownInline(statementValueText(value));
+    : escapeMarkdownInline(statementValueText(value, propertyLabels));
+}
+
+/** A P-ID, with its label beside it when one resolved: `P31 (instance of)`. */
+function formatProperty(pid: string, propertyLabels: PropertyLabels | undefined): string {
+  const label = propertyLabels?.[pid];
+  return label ? `${pid} (${escapeMarkdownInline(label)})` : pid;
 }
 
 /**
  * A `### P-ID` block per property: each statement's value and rank, its id, its qualifiers,
- * and every reference with all of its parts.
+ * and every reference with all of its parts. With `propertyLabels`, each P-ID — heading,
+ * qualifier, reference part, property-typed value — renders beside its label; a P-ID the map
+ * lacks renders bare.
  */
-export function statementLines(statements: Record<string, NormalizedStatement[]>): string[] {
+export function statementLines(
+  statements: Record<string, NormalizedStatement[]>,
+  propertyLabels?: PropertyLabels,
+): string[] {
   const lines: string[] = [];
   for (const [propId, stmts] of Object.entries(statements)) {
-    lines.push('', `### ${propId}`);
+    lines.push('', `### ${formatProperty(propId, propertyLabels)}`);
     for (const stmt of stmts) {
       if (!stmt?.value) continue;
       const rankIndicator =
         stmt.rank === 'preferred' ? ' ★' : stmt.rank === 'deprecated' ? ' ~~(deprecated)~~' : '';
-      lines.push(`- ${formatStatementValue(stmt.value)}${rankIndicator}`);
+      lines.push(`- ${formatStatementValue(stmt.value, propertyLabels)}${rankIndicator}`);
       if (stmt.id) lines.push(`  - id: ${stmt.id}`);
       for (const q of stmt.qualifiers ?? []) {
         if (!q?.value) continue;
-        lines.push(`  - ${q.property}: ${formatStatementValue(q.value)}`);
+        lines.push(
+          `  - ${formatProperty(q.property, propertyLabels)}: ${formatStatementValue(q.value, propertyLabels)}`,
+        );
       }
       if (stmt.references?.length) {
         lines.push(`  - **References (${stmt.references.length}):**`);
         stmt.references.forEach((reference, i) => {
           lines.push(`    - Reference ${i + 1}`);
           for (const part of reference.parts) {
-            lines.push(`      - ${part.property}: ${formatStatementValue(part.value)}`);
+            lines.push(
+              `      - ${formatProperty(part.property, propertyLabels)}: ${formatStatementValue(part.value, propertyLabels)}`,
+            );
           }
         });
       }

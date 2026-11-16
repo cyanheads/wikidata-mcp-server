@@ -12,6 +12,7 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RawStatement } from '@/services/wikidata/types.js';
 import {
+  collectLabelPids,
   collectLabelQids,
   isEntityNotFoundError,
   isPId,
@@ -269,6 +270,27 @@ describe('WikidataRestService', () => {
       expect(Object.keys(result).sort()).toEqual(['P31', 'Q76']);
     });
 
+    it('returns entities in the order the IDs were asked for, whatever order batches finish in', async () => {
+      const held: Array<() => void> = [];
+      mockFetch.mockImplementation(async (url: unknown) => {
+        await new Promise<void>((resolve) => {
+          held.push(resolve);
+          // Once all three batches are in flight, answer the last one sent first.
+          if (held.length === 3) for (const release of held.toReversed()) release();
+        });
+        return jsonResponse({
+          entities: Object.fromEntries(
+            idsOf(url).map((id) => [id, { id, labels: { en: label(`label ${id}`) } }]),
+          ),
+        });
+      });
+      const ids = Array.from({ length: 150 }, (_, i) => `Q${i + 1}`);
+
+      const result = await makeService().fetchLabels(ids, ['en'], createMockContext());
+
+      expect(Object.keys(result)).toEqual(ids);
+    });
+
     it('starts no further batch once one batch fails', async () => {
       let started = 0;
       mockFetch.mockImplementation(async () => {
@@ -475,6 +497,135 @@ describe('WikidataRestService', () => {
     });
   });
 
+  /**
+   * #55: a 500-ID call is 10 batches in 3 rounds of the 4-slot queue, so per-batch retry ladders
+   * chain. One deadline bounds the whole call — queue waits, every attempt, every backoff — so it
+   * settles before an MCP client's 60 s request timeout.
+   */
+  describe('fetchLabels — one deadline per call (#55)', () => {
+    const idsOf = (url: unknown) => new URL(String(url)).searchParams.get('ids')?.split('|') ?? [];
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('fails with Timeout at 50 s when slow batches would run past it', async () => {
+      vi.useFakeTimers();
+      // Each batch's first two attempts hang until their 10 s per-attempt timeout; the third
+      // answers. About 23 s per round, so three rounds would finish near 69 s.
+      const attempts = new Map<string, number>();
+      mockFetch.mockImplementation(async (url: unknown, init?: { signal?: AbortSignal }) => {
+        const batch = idsOf(url)[0] ?? '';
+        const attempt = (attempts.get(batch) ?? 0) + 1;
+        attempts.set(batch, attempt);
+        if (attempt < 3) {
+          await new Promise((_, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+              once: true,
+            });
+          });
+        }
+        return jsonResponse({
+          entities: Object.fromEntries(idsOf(url).map((id) => [id, { id }])),
+        });
+      });
+      const ids = Array.from({ length: 500 }, (_, i) => `Q${i + 1}`);
+
+      const outcome = makeService()
+        .fetchLabels(ids, ['en'], createMockContext())
+        .then(
+          () => 'resolved',
+          (error: unknown) => error,
+        );
+      await vi.advanceTimersByTimeAsync(50_000);
+      const settled = await Promise.race([outcome, Promise.resolve('pending')]);
+
+      expect(settled).toMatchObject({ code: JsonRpcErrorCode.Timeout });
+      expect((settled as Error).message).toContain('50 s');
+      // Round three never finished: its batches were cut off at the deadline.
+      expect([...attempts.values()].filter((n) => n >= 3).length).toBeLessThan(10);
+      await vi.runAllTimersAsync();
+    });
+
+    it('leaves no timer armed once a call resolves', async () => {
+      vi.useFakeTimers();
+      respondWith({ entities: { Q76: { id: 'Q76', labels: { en: label('Barack Obama') } } } });
+
+      await makeService().fetchLabels(['Q76'], ['en'], createMockContext());
+
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
+  /** #52: upstream site codes are all lowercase, so a requested code matches case- and space-blind. */
+  describe('fetchSitelinks — sites filter', () => {
+    const sitelinks = {
+      enwiki: { title: 'Douglas Adams', url: 'https://en.wikipedia.org/wiki/Douglas_Adams' },
+      dewiki: { title: 'Douglas Adams', url: 'https://de.wikipedia.org/wiki/Douglas_Adams' },
+      enwikiquote: { title: 'Douglas Adams', url: 'https://en.wikiquote.org/wiki/Douglas_Adams' },
+    };
+
+    it.each([[['enwiki']], [['ENWIKI']], [[' enwiki ']], [['\tEnWiki\n']]])(
+      'matches sites %j to enwiki',
+      async (sites) => {
+        respondWith(sitelinks);
+
+        const result = await makeService().fetchSitelinks('Q42', sites, createMockContext());
+
+        expect(result).toEqual({ enwiki: sitelinks.enwiki });
+      },
+    );
+
+    it('keeps every requested code that exists, in upstream order', async () => {
+      respondWith(sitelinks);
+
+      const result = await makeService().fetchSitelinks(
+        'Q42',
+        ['ENWIKIQUOTE', 'dewiki', 'frwiki'],
+        createMockContext(),
+      );
+
+      expect(Object.keys(result)).toEqual(['dewiki', 'enwikiquote']);
+    });
+
+    it('returns every sitelink when no sites are requested', async () => {
+      respondWith(sitelinks);
+
+      const result = await makeService().fetchSitelinks('Q42', undefined, createMockContext());
+
+      expect(result).toEqual(sitelinks);
+    });
+  });
+
+  /** A `properties` entry in any form `normalizeId` accepts reaches upstream as its bare P-ID. */
+  describe('fetchStatements — properties forms', () => {
+    const statements = { P31: [], P569: [], P27: [] };
+
+    it.each([['P31'], ['p31'], [' P31 '], ['wd:P31'], ['http://www.wikidata.org/entity/P31']])(
+      'sends a single property %j as ?property=P31',
+      async (property) => {
+        respondWith({ P31: [] });
+
+        await makeService().fetchStatements('Q42', [property], createMockContext());
+
+        expect(urlOf(0)).toMatch(/\/entities\/items\/Q42\/statements\?property=P31$/);
+      },
+    );
+
+    it('filters several properties given in mixed forms to their bare P-IDs', async () => {
+      respondWith(statements);
+
+      const result = await makeService().fetchStatements(
+        'Q42',
+        ['wd:P31', ' p569 ', 'http://www.wikidata.org/entity/P27'],
+        createMockContext(),
+      );
+
+      expect(urlOf(0)).toMatch(/\/entities\/items\/Q42\/statements$/);
+      expect(Object.keys(result).sort()).toEqual(['P27', 'P31', 'P569']);
+    });
+  });
+
   describe('REST not-found classification', () => {
     /**
      * fetchWithTimeout rejects every non-2xx itself, carrying the status on data.status
@@ -523,6 +674,37 @@ describe('WikidataRestService', () => {
       await svc.fetchSitelinks('Q99999999', undefined, createMockContext()).catch(() => undefined);
 
       expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  /** #53: the tool sends limit up to the endpoint's 500 and offset up to 9,999 as given. */
+  describe('search — request parameters', () => {
+    const paramsOf = (call: number) => new URL(urlOf(call)).searchParams;
+
+    it('sends limit and offset as given, on the items or properties path', async () => {
+      respondWith({ results: [] });
+
+      await makeService().search('john', 'item', 'en', 500, 9_990, createMockContext());
+      await makeService().search('date', 'property', 'de', 51, 50, createMockContext());
+
+      expect(new URL(urlOf(0)).pathname).toMatch(/\/search\/items$/);
+      expect(Object.fromEntries(paramsOf(0))).toEqual({
+        q: 'john',
+        language: 'en',
+        limit: '500',
+        offset: '9990',
+      });
+      expect(new URL(urlOf(1)).pathname).toMatch(/\/search\/properties$/);
+      expect(Object.fromEntries(paramsOf(1))).toMatchObject({ limit: '51', offset: '50' });
+    });
+
+    it('omits offset 0', async () => {
+      respondWith({ results: [] });
+
+      await makeService().search('john', 'item', 'en', 10, 0, createMockContext());
+
+      expect(paramsOf(0).has('offset')).toBe(false);
+      expect(paramsOf(0).get('limit')).toBe('10');
     });
   });
 
@@ -819,6 +1001,38 @@ describe('WikidataRestService', () => {
     it('does not rescue an ID that is malformed for other reasons', () => {
       expect(isQId(normalizeId(' Q 76 '))).toBe(false);
       expect(isQId(normalizeId(' notanid '))).toBe(false);
+    });
+
+    /**
+     * #55: the forms wikidata_sparql_query hands back — the full entity URI in structuredContent,
+     * the `wd:` compact form in content[] — reach every ID-taking tool through this one function.
+     */
+    it.each([
+      ['http://www.wikidata.org/entity/Q42', 'Q42'],
+      ['https://www.wikidata.org/entity/Q42', 'Q42'],
+      ['http://www.wikidata.org/entity/P31', 'P31'],
+      ['wd:Q42', 'Q42'],
+      ['wd:p31', 'P31'],
+      [' wd:Q42 ', 'Q42'],
+      ['\thttp://www.wikidata.org/entity/q42\n', 'Q42'],
+      ['HTTP://WWW.WIKIDATA.ORG/ENTITY/Q42', 'Q42'],
+      ['WD:Q42', 'Q42'],
+    ])('maps the entity form %j to %j', (input, expected) => {
+      expect(normalizeId(input)).toBe(expected);
+    });
+
+    it.each([
+      ['http://www.wikidata.org/prop/direct/P31'],
+      ['https://www.wikidata.org/wiki/Q42'],
+      ['http://wikidata.org/entity/Q42'],
+      ['https://www.wikidata.org/entity/'],
+      ['wdt:P31'],
+      ['wd:wd:Q42'],
+      ['xwd:Q42'],
+      ['Q42 http://www.wikidata.org/entity/Q42'],
+    ])('leaves %j failing the strict format check', (input) => {
+      const id = normalizeId(input);
+      expect(isQId(id) || isPId(id)).toBe(false);
     });
   });
 
@@ -1290,6 +1504,69 @@ describe('WikidataRestService', () => {
 
       it('returns an empty set for no statements', () => {
         expect(collectLabelQids([]).size).toBe(0);
+      });
+    });
+
+    describe('collectLabelPids (#56)', () => {
+      it('collects the statement, qualifier, and reference-part properties, deduplicated', () => {
+        const pids = collectLabelPids([q42P31, q42P31]);
+
+        expect([...pids].sort()).toEqual(
+          ['P31', 'P805', 'P248', 'P268', 'P407', 'P813', 'P227', 'P950'].sort(),
+        );
+      });
+
+      it('collects property-typed values at every level, and no other entity-ID kind', () => {
+        const pids = collectLabelPids([
+          statement(snak('P1659', 'wikibase-property', val('P279')), {
+            qualifiers: [
+              snak('P1696', 'wikibase-property', val('P1647')),
+              snak('P5188', 'wikibase-lexeme', val('L37633')),
+            ],
+            references: [
+              {
+                parts: [
+                  snak('P3', 'wikibase-property', val('P31')),
+                  snak('P12861', 'entity-schema', val('E10')),
+                ],
+              },
+            ],
+          }),
+        ]);
+
+        expect([...pids].sort()).toEqual(
+          ['P1659', 'P279', 'P1696', 'P1647', 'P5188', 'P3', 'P31', 'P12861'].sort(),
+        );
+      });
+
+      it('keeps the property of a somevalue/novalue snak but reads no value from it', () => {
+        const pids = collectLabelPids([
+          statement(snak('P1659', 'wikibase-property', { type: 'somevalue' }), {
+            qualifiers: [snak('P1696', 'wikibase-property', { type: 'novalue' })],
+          }),
+        ]);
+
+        expect([...pids].sort()).toEqual(['P1659', 'P1696']);
+      });
+
+      it('collects no Q-ID, whatever the value type', () => {
+        const pids = collectLabelPids([
+          statement(snak('P31', 'wikibase-item', val('Q5')), {
+            qualifiers: [
+              snak(
+                'P2046',
+                'quantity',
+                val({ amount: '+1', unit: 'http://www.wikidata.org/entity/Q712226' }),
+              ),
+            ],
+          }),
+        ]);
+
+        expect([...pids].sort()).toEqual(['P2046', 'P31']);
+      });
+
+      it('returns an empty set for no statements', () => {
+        expect(collectLabelPids([]).size).toBe(0);
       });
     });
   });

@@ -5,13 +5,8 @@
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  RESPONSE_BUDGET_BYTES,
-  rowAllowance,
-  rowCharge,
-  wikidataSparqlQuery,
-} from '@/mcp-server/tools/definitions/sparql-query.tool.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { wikidataSparqlQuery } from '@/mcp-server/tools/definitions/sparql-query.tool.js';
 import { inlineText } from '../helpers/markdown.js';
 import { expectBoundedScan } from '../helpers/scan-cost.js';
 
@@ -28,14 +23,6 @@ const tableRows = (text: string) =>
     .filter((line) => line.startsWith('| '))
     .slice(2);
 
-const utf8Bytes = (text: string) => new TextEncoder().encode(text).length;
-
-/** Bytes on each surface of a tool result, as the caller receives it. */
-const surfaceBytes = (result: Awaited<ReturnType<typeof runToolContract>>) => ({
-  structured: utf8Bytes(JSON.stringify(result.structuredContent)),
-  text: utf8Bytes(result.content.map((b) => (b as { text: string }).text).join('')),
-});
-
 const sparqlResponse = {
   head: { vars: ['item', 'itemLabel'] },
   results: {
@@ -46,6 +33,7 @@ const sparqlResponse = {
       },
     ],
   },
+  stoppedEarly: false,
 };
 
 describe('wikidataSparqlQuery', () => {
@@ -63,7 +51,6 @@ describe('wikidataSparqlQuery', () => {
     const result = await wikidataSparqlQuery.handler(input, ctx);
 
     expect(result.variables).toEqual(['item', 'itemLabel']);
-    expect(result.truncated).toBe(false);
     expect(result.results[0]!.item).toBeDefined();
 
     const enrichment = getEnrichment(ctx);
@@ -89,21 +76,6 @@ describe('wikidataSparqlQuery', () => {
     expect(enrichment.totalCount).toBe(0);
     expect(enrichment.notice).toBeDefined();
     expect(enrichment.notice).toContain('No results');
-  });
-
-  it('sets truncated=true when result count equals 10,000 (server cap)', async () => {
-    const bindings = Array.from({ length: 10_000 }, (_, i) => ({
-      item: { type: 'uri' as const, value: `http://www.wikidata.org/entity/Q${i + 1}` },
-    }));
-    mockQuery.mockResolvedValue({ head: { vars: ['item'] }, results: { bindings } });
-
-    const ctx = createMockContext({ errors: wikidataSparqlQuery.errors });
-    const input = wikidataSparqlQuery.input.parse({
-      query: 'SELECT ?item WHERE { ?item wdt:P31 wd:Q5. }',
-    });
-    const result = await wikidataSparqlQuery.handler(input, ctx);
-
-    expect(result.truncated).toBe(true);
   });
 
   it('throws parse_error when service signals a parse failure', async () => {
@@ -149,6 +121,13 @@ describe('wikidataSparqlQuery', () => {
     });
   });
 
+  it('declares timeout guidance that fits a query already carrying a LIMIT', () => {
+    const recovery = wikidataSparqlQuery.errors?.find((e) => e.reason === 'timeout')?.recovery;
+
+    expect(recovery).toMatch(/^Narrow the WHERE clause/);
+    expect(recovery).not.toContain('Add a LIMIT clause');
+  });
+
   it('throws throttled when service signals rate limiting', async () => {
     mockQuery.mockRejectedValue({ data: { reason: 'throttled' }, message: 'Rate limited' });
 
@@ -159,6 +138,40 @@ describe('wikidataSparqlQuery', () => {
     await expect(wikidataSparqlQuery.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'throttled' },
     });
+  });
+
+  it('throws result_too_large when the service stops a body at its byte ceiling', async () => {
+    mockQuery.mockRejectedValue({
+      data: { reason: 'result_too_large' },
+      message: 'The SPARQL result is larger than the 8 MiB one call reads.',
+    });
+
+    const result = await runToolContract(wikidataSparqlQuery, {
+      query: 'SELECT ?item WHERE { ?item wdt:P31 wd:Q5. } LIMIT 10',
+    } as never);
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.ValidationError, data: { reason: 'result_too_large' } },
+    });
+  });
+
+  /** The service reads Retry-After into data.retryAfter; the re-mapped error must keep it. */
+  it('carries the upstream Retry-After through to the throttled error on the wire', async () => {
+    mockQuery.mockRejectedValue({
+      data: { reason: 'throttled', retryAfter: '30' },
+      message: 'Wikidata SPARQL endpoint is rate-limited. Retry after 30s.',
+    });
+
+    const result = await runToolContract(wikidataSparqlQuery, {
+      query: 'SELECT ?item WHERE { ?item wdt:P31 wd:Q5. } LIMIT 10',
+    } as never);
+
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'throttled', retryAfter: '30' } },
+    });
+    const text = result.content.map((b) => (b as { text: string }).text).join('');
+    expect(text).toContain('retry after `30`');
   });
 
   it('re-throws unknown service errors', async () => {
@@ -182,7 +195,6 @@ describe('wikidataSparqlQuery', () => {
         },
       ],
       variables: ['item', 'itemLabel'],
-      truncated: false,
     };
     const blocks = wikidataSparqlQuery.format!(output);
     const text = (blocks[0] as { text: string }).text;
@@ -194,7 +206,6 @@ describe('wikidataSparqlQuery', () => {
     const output = {
       results: [],
       variables: ['item'],
-      truncated: false,
     };
     const blocks = wikidataSparqlQuery.format!(output);
     const text = (blocks[0] as { text: string }).text;
@@ -208,7 +219,6 @@ describe('wikidataSparqlQuery', () => {
     const blocks = wikidataSparqlQuery.format!({
       results: rows,
       variables: ['item'],
-      truncated: false,
     });
     const text = blocks.map((b) => (b as { text: string }).text).join('\n');
 
@@ -217,15 +227,16 @@ describe('wikidataSparqlQuery', () => {
     expect(text).not.toContain('more rows');
   });
 
-  it('format: reflects truncated=true flag', () => {
-    const output = {
+  /** The header names the variables only; it states no row cap. */
+  it('format: the header names the variables and claims no server cap', () => {
+    const blocks = wikidataSparqlQuery.format!({
       results: [{ item: { type: 'uri', value: 'http://www.wikidata.org/entity/Q1' } }],
-      variables: ['item'],
-      truncated: true,
-    };
-    const blocks = wikidataSparqlQuery.format!(output);
+      variables: ['item', 'label'],
+    });
     const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('true');
+
+    expect(text.split('\n')[0]).toBe('**Variables:** item, label');
+    expect(text).not.toMatch(/truncated|10,000/i);
   });
 
   it('enrichment: totalCount is set on non-empty results', async () => {
@@ -322,7 +333,9 @@ describe('wikidataSparqlQuery', () => {
       const result = await call({ query, language });
 
       expect(result.isError).toBeFalsy();
-      expect(mockQuery).toHaveBeenCalledWith(query, expected, 30_000, expect.anything());
+      expect(mockQuery).toHaveBeenCalledWith(query, expected, 30_000, expect.anything(), {
+        maxRows: 4_000,
+      });
     });
 
     it.each([
@@ -527,231 +540,250 @@ describe('wikidataSparqlQuery', () => {
   });
 
   /**
-   * #28: content[] rendered only the first 20 rows while structuredContent carried up to 10,000
-   * (2.5 MB). Both surfaces now carry the same leading rows, each held to 64,000 bytes.
+   * #51: the Query Service has no row cap, so `LIMIT`/`OFFSET` is the page boundary, and a
+   * 4,000-row ceiling bounds every query. The service reads at most 4,001 bindings and reports
+   * `stoppedEarly`; the tool serves the first 4,000 and discloses the ceiling (#10: an agent can
+   * tell a partial result from a whole one).
    */
-  describe('response budget (#28)', () => {
-    const query = 'SELECT ?item ?label WHERE { ?item rdfs:label ?label }';
-    const run = (bindings: unknown[], vars = ['item', 'label']) => {
-      mockQuery.mockResolvedValue({ head: { vars }, results: { bindings } });
+  describe('row ceiling (#51)', () => {
+    const query = 'SELECT ?item ?dob ?label WHERE { ?item wdt:P31 wd:Q5 } LIMIT 10000';
+    const vars = ['item', 'dob', 'label'];
+    const row = (i: number) => ({
+      item: { type: 'uri', value: `http://www.wikidata.org/entity/Q${i}` },
+      dob: {
+        type: 'literal',
+        value: '1952-03-11T00:00:00Z',
+        datatype: 'http://www.w3.org/2001/XMLSchema#dateTime',
+      },
+      label: { type: 'literal', value: `Person ${i}`, 'xml:lang': 'en' },
+    });
+    const rows = (count: number) => Array.from({ length: count }, (_, i) => row(i + 1));
+
+    const serve = (bindings: unknown[], stoppedEarly: boolean) =>
+      mockQuery.mockResolvedValue({ head: { vars }, results: { bindings }, stoppedEarly });
+    const run = (bindings: unknown[], stoppedEarly: boolean) => {
+      serve(bindings, stoppedEarly);
       return runToolContract(wikidataSparqlQuery, { query });
+    };
+
+    /**
+     * Stubs WIKIDATA_CLAMP_LIMITS, then imports the tool fresh, so the lazily parsed server config
+     * re-reads it. Cases that stub nothing use the static import.
+     */
+    const freshTool = async (clampLimits: string) => {
+      vi.stubEnv('WIKIDATA_CLAMP_LIMITS', clampLimits);
+      vi.resetModules();
+      return (await import('@/mcp-server/tools/definitions/sparql-query.tool.js'))
+        .wikidataSparqlQuery;
     };
     type Structured = {
       results: Array<Record<string, { value: string }>>;
-      truncated: boolean;
-      totalCount: number;
-      returnedCount?: number;
+      totalCount?: number;
+      truncated?: boolean;
+      shown?: number;
+      cap?: number;
       notice?: string;
+      returnedCount?: number;
     };
     const structuredOf = (result: Awaited<ReturnType<typeof run>>) =>
       result.structuredContent as Structured;
     const textOf = (result: Awaited<ReturnType<typeof run>>) =>
       result.content.map((b) => (b as { text: string }).text).join('');
 
-    /** A row whose value is `n` characters of padding — the size lever for boundary tests. */
-    const row = (i: number, n: number) => ({
-      item: { type: 'uri', value: `http://www.wikidata.org/entity/Q${i}` },
-      label: { type: 'literal', value: 'x'.repeat(n), 'xml:lang': 'en' },
+    afterEach(() => {
+      vi.unstubAllEnvs();
     });
 
-    /**
-     * `count` rows whose charges sum to exactly `total` bytes: equal rows, with the last row
-     * padded by the remainder (each padding character adds one byte to the charge).
-     */
-    const rowsCharging = (count: number, total: number) => {
-      const base = rowCharge(row(1, 0), ['item', 'label']);
-      const each = Math.floor(total / count) - base;
-      const rows = Array.from({ length: count }, (_, i) => row(i + 1, each));
-      const spent = rows.reduce((sum, r) => sum + rowCharge(r, ['item', 'label']), 0);
-      rows[count - 1] = row(count, each + (total - spent));
-      return rows;
-    };
+    it('asks the service for at most 4,000 rows', async () => {
+      await run(rows(1), false);
 
-    it('returns a result that fits unchanged, stating both counts', async () => {
-      const result = await run([row(1, 5), row(2, 5)]);
-      const structured = structuredOf(result);
-
-      expect(structured.results).toHaveLength(2);
-      expect(structured.totalCount).toBe(2);
-      expect(structured.returnedCount).toBe(2);
-      expect(structured.notice).toBeUndefined();
-      expect(tableRows(textOf(result))).toHaveLength(2);
-      expect(textOf(result)).toContain('**Rows returned:** 2');
+      expect(mockQuery).toHaveBeenCalledWith(query, 'en', 30_000, expect.anything(), {
+        maxRows: 4_000,
+      });
     });
 
-    it('budgets escaped literals and URI link syntax against the actual text surface', async () => {
-      const bindings = Array.from({ length: 100 }, (_, i) => ({
-        uri: { type: 'uri', value: `https://example.org/${i}/${'a|b_(c)'.repeat(100)}` },
-        literal: { type: 'literal', value: '*[x] &copy; |'.repeat(100) },
-      }));
-      const result = await run(bindings, ['uri', 'literal']);
-      const structured = structuredOf(result);
-      expect(structured.returnedCount).toBeGreaterThan(0);
-      expect(structured.returnedCount).toBeLessThan(100);
-      expect(structured.results).toEqual(bindings.slice(0, structured.returnedCount));
-      expect(structured.notice).toContain('first');
-      expect(surfaceBytes(result).text).toBeLessThanOrEqual(64_000);
-      expect(surfaceBytes(result).structured).toBeLessThanOrEqual(64_000);
-    });
+    it.each([25, 4_000])(
+      'returns a whole %i-row result on both surfaces, with totalCount and no truncation',
+      async (count) => {
+        const result = await run(rows(count), false);
+        const structured = structuredOf(result);
+        const text = textOf(result);
 
-    it('returns every row when their charges land exactly on the budget', async () => {
-      const allowance = rowAllowance(['item', 'label'], 40, false);
-      const bindings = rowsCharging(40, allowance);
-      expect(bindings.reduce((sum, r) => sum + rowCharge(r, ['item', 'label']), 0)).toBe(allowance);
+        expect(structured.results).toHaveLength(count);
+        expect(structured.totalCount).toBe(count);
+        expect(structured).not.toHaveProperty('truncated');
+        expect(structured).not.toHaveProperty('shown');
+        expect(structured).not.toHaveProperty('cap');
+        expect(structured).not.toHaveProperty('notice');
+        expect(structured).not.toHaveProperty('returnedCount');
+        expect(tableRows(text)).toHaveLength(count);
+        expect(tableRows(text).at(-1)).toContain(`wd:Q${count} `);
+        expect(text).toContain(`**${count} total**`);
+      },
+    );
 
-      const result = await run(bindings);
-      const structured = structuredOf(result);
-
-      expect(structured.results).toHaveLength(40);
-      expect(structured.returnedCount).toBe(40);
-      expect(structured.notice).toBeUndefined();
-      expect(tableRows(textOf(result))).toHaveLength(40);
-      const size = surfaceBytes(result);
-      expect(size.structured).toBeLessThanOrEqual(RESPONSE_BUDGET_BYTES);
-      expect(size.text).toBeLessThanOrEqual(RESPONSE_BUDGET_BYTES);
-    });
-
-    it('cuts the last row when the charges run one byte over, on both surfaces', async () => {
-      const allowance = rowAllowance(['item', 'label'], 40, false);
-      const bindings = rowsCharging(40, allowance + 1);
-
-      const result = await run(bindings);
+    it('serves the first 4,000 rows of a larger result and discloses the ceiling on both surfaces', async () => {
+      const result = await run(rows(4_000), true);
       const structured = structuredOf(result);
       const text = textOf(result);
 
-      expect(structured.results).toHaveLength(39);
-      expect(structured.totalCount).toBe(40);
-      expect(structured.returnedCount).toBe(39);
-      expect(structured.truncated).toBe(false);
-      expect(structured.notice).toContain('first 39 of 40 rows');
+      expect(structured.results).toHaveLength(4_000);
+      expect(structured.truncated).toBe(true);
+      expect(structured.shown).toBe(4_000);
+      expect(structured.cap).toBe(4_000);
+      expect(structured).not.toHaveProperty('totalCount');
+      expect(structured).not.toHaveProperty('returnedCount');
+      expect(structured.notice).toContain('first 4,000 rows');
       expect(structured.notice).toContain('ORDER BY');
-      expect(structured.notice).toContain('LIMIT/OFFSET');
+      expect(structured.notice).toContain('LIMIT of at most 4,000');
+      expect(structured.notice).toContain('OFFSET');
       expect(structured.notice).toContain('aggregate');
-      // The same leading rows on both surfaces, and the counts and notice reach content[] too.
-      const rendered = tableRows(text);
-      expect(rendered).toHaveLength(39);
-      expect(rendered.at(-1)).toContain('wd:Q39 ');
-      expect(structured.results.at(-1)?.item?.value).toBe('http://www.wikidata.org/entity/Q39');
-      expect(text).toContain('40 total');
-      expect(text).toContain('**Rows returned:** 39');
-      expect(text).toContain('> Showing the first 39 of 40 rows');
-      const size = surfaceBytes(result);
-      expect(size.structured).toBeLessThanOrEqual(RESPONSE_BUDGET_BYTES);
-      expect(size.text).toBeLessThanOrEqual(RESPONSE_BUDGET_BYTES);
+      // Narrowing and aggregating come before paging: they are what works on a large match.
+      const notice = structured.notice as string;
+      expect(notice.indexOf('Narrow the WHERE clause')).toBeGreaterThan(-1);
+      expect(notice.indexOf('Narrow the WHERE clause')).toBeLessThan(notice.indexOf('ORDER BY'));
+      expect(notice.indexOf('aggregate')).toBeLessThan(notice.indexOf('ORDER BY'));
+      expect(tableRows(text)).toHaveLength(4_000);
+      expect(tableRows(text).at(-1)).toContain('wd:Q4000 ');
+      expect(text).toContain('> Showing the first 4,000 rows');
+      expect(text).toMatch(/truncated\W+true/i);
+      expect(text).not.toContain('total**');
     });
 
-    /**
-     * Fifty variables, one bound: the rendered row (49 empty cells) outweighs its serialized
-     * binding, so the charge — and the boundary — is set by the content[] side.
-     */
-    it('holds content[] at the boundary when rendered rows outweigh their bindings', async () => {
-      const vars = Array.from({ length: 50 }, (_, i) => `v${i + 1}`);
-      const sparse = (n: number) => ({ v1: { type: 'literal', value: 'x'.repeat(n) } });
-      expect(utf8Bytes(JSON.stringify(sparse(0)))).toBeLessThan(rowCharge(sparse(0), vars) - 1);
-      const allowance = rowAllowance(vars, 300, false);
-      const base = rowCharge(sparse(0), vars);
-      const each = Math.floor(allowance / 300) - base;
-      const bindings = Array.from({ length: 300 }, () => sparse(each));
-      const spent = bindings.reduce((sum, r) => sum + rowCharge(r, vars), 0);
-      bindings[299] = sparse(each + (allowance - spent));
+    it('logs a capped result as served at the cap', async () => {
+      serve(rows(4_000), true);
+      const ctx = createMockContext({ errors: wikidataSparqlQuery.errors });
+      const notice = vi.spyOn(ctx.log, 'notice');
 
-      const atBudget = await run(bindings, vars);
-      expect(structuredOf(atBudget).returnedCount).toBe(300);
-      expect(surfaceBytes(atBudget).text).toBeLessThanOrEqual(RESPONSE_BUDGET_BYTES);
+      await wikidataSparqlQuery.handler(wikidataSparqlQuery.input.parse({ query }), ctx);
 
-      bindings[299] = sparse(each + (allowance - spent) + 1);
-      const over = await run(bindings, vars);
-      expect(structuredOf(over).returnedCount).toBe(299);
-      expect(tableRows(textOf(over))).toHaveLength(299);
-      expect(surfaceBytes(over).text).toBeLessThanOrEqual(RESPONSE_BUDGET_BYTES);
-    });
-
-    /**
-     * The notice is a paging recipe an agent executes. Its example must order by variables the
-     * query actually projects, and it cannot be a fixed `OFFSET <returned>`: the cut page came
-     * from an unordered query (no stable order to continue), and a page cut again returns fewer
-     * rows than its LIMIT, so the next OFFSET is the running sum of returnedCount. The query here
-     * binds no `?item`, the variable a fixed example would have named.
-     */
-    it('pages by the notice: ORDER BY over the result variables, from OFFSET 0, advancing by returnedCount', async () => {
-      const vars = ['a', 'b', 'c', 'd', 'e'];
-      const wide = (i: number) =>
-        Object.fromEntries(
-          vars.map((v) => [v, { type: 'literal', value: `${i}-${'x'.repeat(3_000)}` }]),
-        );
-      const result = await run(
-        Array.from({ length: 10 }, (_, i) => wide(i)),
-        vars,
+      expect(notice).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ field: 'rows', tool: 'wikidata_sparql_query', applied: 4_000 }),
       );
-      const { notice = '', returnedCount } = structuredOf(result);
-      expect(returnedCount).toBeLessThan(10);
-
-      // The query's own variables in projection order, at most four.
-      const orderBy = /ORDER BY((?:\s+\?\w+)+)/.exec(notice)?.[1]?.trim().split(/\s+/);
-      expect(orderBy).toEqual(['?a', '?b', '?c', '?d']);
-      expect(notice).toContain('OFFSET 0');
-      expect(notice).toContain('returnedCount');
-      expect(notice).not.toContain(`OFFSET ${returnedCount})`);
     });
 
-    it('returns no rows, and says why, when the first row alone overflows', async () => {
-      const result = await run([row(1, 70_000), row(2, 5)]);
-      const structured = structuredOf(result);
+    it.each([
+      ['by default', undefined],
+      ['with WIKIDATA_CLAMP_LIMITS=true', 'true'],
+    ])('serves a capped result %s', async (_name, value) => {
+      const tool = value === undefined ? wikidataSparqlQuery : await freshTool(value);
+      serve(rows(4_000), true);
 
-      expect(structured.results).toHaveLength(0);
-      expect(structured.totalCount).toBe(2);
-      expect(structured.returnedCount).toBe(0);
-      expect(structured.notice).toContain('first row alone exceeds');
-      expect(tableRows(textOf(result))).toHaveLength(0);
-      const size = surfaceBytes(result);
-      expect(size.structured).toBeLessThanOrEqual(RESPONSE_BUDGET_BYTES);
-      expect(size.text).toBeLessThanOrEqual(RESPONSE_BUDGET_BYTES);
+      const result = await runToolContract(tool, { query });
+
+      expect(result.isError).toBeFalsy();
+      expect(structuredOf(result).truncated).toBe(true);
     });
 
-    it('returns an empty result with zero counts and the no-results notice', async () => {
-      const result = await run([]);
+    it('rejects a result past the ceiling, naming 4,000, with WIKIDATA_CLAMP_LIMITS=false', async () => {
+      const fresh = await freshTool('false');
+      serve(rows(4_000), true);
+
+      const result = await runToolContract(fresh, { query });
+
+      expect(result.isError).toBe(true);
+      const { error } = result.structuredContent as { error: { code: number; message: string } };
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.message).toContain('4,000-row ceiling');
+      expect(error.message).toContain('LIMIT of at most 4,000');
+      expect(error.message).toContain('ORDER BY');
+      expect(mockQuery).toHaveBeenCalledTimes(1);
+    });
+
+    it('still returns a whole 4,000-row result with WIKIDATA_CLAMP_LIMITS=false', async () => {
+      const fresh = await freshTool('false');
+      serve(rows(4_000), false);
+
+      const result = await runToolContract(fresh, { query });
+
+      expect(result.isError).toBeFalsy();
+      expect(structuredOf(result).totalCount).toBe(4_000);
+    });
+
+    it('returns an empty result with a zero count and the no-results notice on both surfaces', async () => {
+      const result = await run([], false);
       const structured = structuredOf(result);
+      const text = textOf(result);
 
       expect(structured.results).toHaveLength(0);
       expect(structured.totalCount).toBe(0);
-      expect(structured.returnedCount).toBe(0);
+      expect(structured).not.toHaveProperty('truncated');
       expect(structured.notice).toContain('No results returned');
-      expect(textOf(result)).toContain('**Rows returned:** 0');
+      expect(tableRows(text)).toHaveLength(0);
+      expect(text).toContain('**0 total**');
+      expect(text).toContain('> No results returned');
+    });
+  });
+
+  /**
+   * #49: since the WDQS graph split, scholarly articles live only in the scholarly graph, which a
+   * main-graph query reaches through `SERVICE wdsubgraph:scholarly_articles { … }` — and their
+   * labels only from inside that block, since the injected label SERVICE runs on the main graph.
+   */
+  describe('scholarly graph guidance (#49)', () => {
+    const SUBGRAPH = 'SERVICE wdsubgraph:scholarly_articles { … }';
+
+    it('the description routes scholarly articles through the subgraph SERVICE, labels read inside it', () => {
+      expect(wikidataSparqlQuery.description).toContain(SUBGRAPH);
+      expect(wikidataSparqlQuery.description).toContain('wdsubgraph: is predeclared');
+      expect(wikidataSparqlQuery.description).toContain('BIND(?paperLabel AS ?paperLabel)');
+      expect(wikidataSparqlQuery.description).toContain('label SERVICE runs on the main graph');
     });
 
-    /** The 10,000-row shape from the issue: ~2.5 MB of structuredContent before the budget. */
-    it('holds a 10,000-row result to the budget on both surfaces, keeping truncated for the server cap', async () => {
-      const bindings = Array.from({ length: 10_000 }, (_, i) => ({
-        item: { type: 'uri', value: `http://www.wikidata.org/entity/Q${i + 1}` },
-        dob: {
-          type: 'literal',
-          value: '1952-03-11T00:00:00Z',
-          datatype: 'http://www.w3.org/2001/XMLSchema#dateTime',
-        },
-        label: { type: 'literal', value: `Person ${i + 1}`, 'xml:lang': 'en' },
-      }));
+    it('the no-results notice names the subgraph SERVICE on both surfaces', async () => {
+      mockQuery.mockResolvedValue({
+        head: { vars: ['paper'] },
+        results: { bindings: [] },
+        stoppedEarly: false,
+      });
 
-      const result = await run(bindings, ['item', 'dob', 'label']);
-      const structured = structuredOf(result);
-      const returned = structured.results.length;
+      const result = await runToolContract(wikidataSparqlQuery, {
+        query: 'SELECT ?paper WHERE { ?paper wdt:P50 wd:Q3571662 }',
+      });
 
-      expect(structured.truncated).toBe(true);
-      expect(structured.totalCount).toBe(10_000);
-      expect(returned).toBeGreaterThan(100);
-      expect(returned).toBeLessThan(10_000);
-      expect(structured.returnedCount).toBe(returned);
-      expect(tableRows(textOf(result))).toHaveLength(returned);
-      expect(structured.notice).toContain(`first ${returned} of 10000 rows`);
-      const size = surfaceBytes(result);
-      expect(size.structured).toBeLessThanOrEqual(RESPONSE_BUDGET_BYTES);
-      expect(size.text).toBeLessThanOrEqual(RESPONSE_BUDGET_BYTES);
+      expect((result.structuredContent as { notice: string }).notice).toContain(SUBGRAPH);
+      const text = result.content.map((b) => (b as { text: string }).text).join('');
+      expect(inlineText(text)).toContain('SERVICE wdsubgraph:scholarly_articles');
+    });
+
+    it('the no-results notice says how to read an article label inside the block', async () => {
+      mockQuery.mockResolvedValue({
+        head: { vars: ['paper', 'paperLabel'] },
+        results: { bindings: [] },
+        stoppedEarly: false,
+      });
+
+      const result = await runToolContract(wikidataSparqlQuery, {
+        query: 'SELECT ?paper ?paperLabel WHERE { ?paper wdt:P356 "10.1038/NATURE14539" }',
+      });
+
+      const BIND = 'BIND(?paperLabel AS ?paperLabel)';
+      expect((result.structuredContent as { notice: string }).notice).toContain(BIND);
+      const text = result.content.map((b) => (b as { text: string }).text).join('');
+      expect(inlineText(text)).toContain(BIND);
+    });
+
+    it('the parse_error recovery hint names the subgraph SERVICE on the wire', async () => {
+      mockQuery.mockRejectedValue({
+        data: { reason: 'parse_error', cause: 'Encountered " "}" "} "" at line 1, column 40.' },
+        message: 'SPARQL parse error: Encountered " "}" "} "" at line 1, column 40.',
+      });
+
+      const result = await runToolContract(wikidataSparqlQuery, {
+        query: 'SELECT ?paper WHERE { SERVICE wdsubgraph:scholarly_articles { } }',
+      });
+
+      const { error } = result.structuredContent as {
+        error: { data: { recovery: { hint: string } } };
+      };
+      expect(error.data.recovery.hint).toContain(SUBGRAPH);
     });
   });
 
   describe('cell rendering (#28)', () => {
     const render = (results: Array<Record<string, Record<string, string>>>, variables: string[]) =>
-      (wikidataSparqlQuery.format!({ results, variables, truncated: false })[0] as { text: string })
-        .text;
+      (wikidataSparqlQuery.format!({ results, variables })[0] as { text: string }).text;
 
     it.each(['', '|tail'])(
       'renders a long backslash run followed by %j within the bounded scan ceiling',

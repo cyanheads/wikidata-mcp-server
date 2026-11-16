@@ -13,14 +13,22 @@ import {
   normalizeId,
 } from '@/services/wikidata/wikidata-rest-service.js';
 
+/** A Wikipedia edition's host: one label under wikipedia.org (`en`, `be-tarask`, `simple`). */
+const WIKIPEDIA_HOST = /^[a-z0-9-]+\.wikipedia\.org$/;
+
+/**
+ * True when a sitelink is a Wikipedia edition: the host of its own URL is
+ * `<edition>.wikipedia.org`. The site code cannot tell — ten non-Wikipedia codes end in "wiki"
+ * (commonswiki, specieswiki, wikidatawiki, …), and underscore codes name hyphenated hosts
+ * (be_x_oldwiki is be-tarask.wikipedia.org). An entry without a URL does not count as one.
+ */
+const isWikipediaEdition = (sitelink: { url?: string | null | undefined }): boolean =>
+  WIKIPEDIA_HOST.test(URL.parse(sitelink.url ?? '')?.hostname ?? '');
+
 export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
   title: 'Get Wikidata Sitelinks',
   description:
-    'Fetch Wikipedia and Wikimedia project article URLs for a Wikidata item. ' +
-    'A sitelink maps a site code (e.g., "enwiki") to a Wikipedia article title and URL. ' +
-    'Major items can have 300+ sitelinks across languages. ' +
-    'Use sites to filter to specific language editions, or wikis_only to return only Wikipedia links. ' +
-    'Only Q-IDs (items) have sitelinks — properties (P-IDs) do not.',
+    'Fetch Wikipedia and other Wikimedia project article URLs for a Wikidata item. A sitelink maps a site code (e.g., "enwiki", "commonswiki") to an article title and URL. Major items can have 300+ sitelinks across languages. Use sites to filter to specific site codes, or wikis_only to return only Wikipedia editions. Only Q-IDs (items) have sitelinks — properties (P-IDs) do not.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -28,21 +36,19 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
       .string()
       .min(1)
       .describe(
-        'Q-ID of the item (e.g., "Q76"). Only items have sitelinks; properties (P-IDs) are not supported.',
+        'Q-ID of the item (e.g., "Q76"), bare or as an entity URI or wd: form (e.g., "http://www.wikidata.org/entity/Q76", "wd:Q76"). Only items have sitelinks; properties (P-IDs) are not supported.',
       ),
     sites: z
       .array(z.string().min(1))
       .optional()
       .describe(
-        'Optional filter to specific site codes (e.g., ["enwiki", "frwiki", "dewiki"]). ' +
-          'Omit to return all sitelinks.',
+        'Optional filter to specific site codes (e.g., ["enwiki", "frwiki", "commonswiki"]), matched in any case with surrounding whitespace ignored. Omit to return all sitelinks.',
       ),
     wikis_only: z
       .boolean()
       .default(false)
       .describe(
-        'When true, return only Wikipedia sitelinks (site codes ending in "wiki", e.g., "enwiki", "dewiki"). ' +
-          'Excludes Wikisource, Wiktionary, Wikiquote, etc.',
+        'When true, return only Wikipedia editions: sitelinks whose URL is on a <subdomain>.wikipedia.org host, such as enwiki (en.wikipedia.org) or be_x_oldwiki (be-tarask.wikipedia.org). Excludes Wikimedia Commons, Wikispecies, Wikisource, Wiktionary, Wikiquote, and every other project.',
       ),
   }),
 
@@ -110,13 +116,9 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
       throw err;
     }
 
-    // Apply wikis_only filter
-    let sitelinks = rawSitelinks;
-    if (input.wikis_only) {
-      sitelinks = Object.fromEntries(
-        Object.entries(rawSitelinks).filter(([code]) => code.endsWith('wiki')),
-      );
-    }
+    const sitelinks = input.wikis_only
+      ? Object.fromEntries(Object.entries(rawSitelinks).filter(([, sl]) => isWikipediaEdition(sl)))
+      : rawSitelinks;
 
     const normalized = Object.fromEntries(
       Object.entries(sitelinks).map(([code, sl]) => [
@@ -132,11 +134,17 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
     const count = Object.keys(normalized).length;
 
     if (count === 0) {
-      const hint = input.sites?.length
-        ? `None of the requested site codes (${input.sites.join(', ')}) were found on ${id}.`
-        : input.wikis_only
+      // With sites set, a requested code present upstream was dropped only by wikis_only.
+      const present = Object.keys(rawSitelinks);
+      const hint = !input.sites?.length
+        ? input.wikis_only
           ? `${id} has no Wikipedia (wikis_only) sitelinks.`
-          : `${id} has no sitelinks.`;
+          : `${id} has no sitelinks.`
+        : present.length === 0
+          ? `None of the requested site codes (${input.sites.join(', ')}) were found on ${id}.`
+          : present.length === 1
+            ? `The requested sitelink ${present[0]} on ${id} is not a Wikipedia edition; wikis_only returns Wikipedia editions only.`
+            : `The requested sitelinks ${present.join(', ')} on ${id} are not Wikipedia editions; wikis_only returns Wikipedia editions only.`;
       return { id, sitelinks: {}, count: 0, message: hint };
     }
 
@@ -150,19 +158,17 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
       lines.push(`\n> ${escapeMarkdownInline(result.message)}`);
     }
 
-    // Sort: Wikipedia editions first, then others
+    // Wikipedia editions first, then every other project, each group in upstream order.
     const entries = Object.entries(result.sitelinks);
-    const wikis = entries.filter(([code]) => code.endsWith('wiki'));
-    const others = entries.filter(([code]) => !code.endsWith('wiki'));
-    const sorted = [...wikis, ...others];
+    const sorted = [
+      ...entries.filter(([, sl]) => isWikipediaEdition(sl)),
+      ...entries.filter(([, sl]) => !isWikipediaEdition(sl)),
+    ];
 
     for (const [code, sl] of sorted) {
-      const url =
-        sl.url ??
-        `https://${code.replace('wiki', '')}.wikipedia.org/wiki/${encodeURIComponent(sl.title)}`;
-      lines.push(
-        `**${code}:** ${markdownLink(sl.title, url)}${sl.badges?.length ? ` [${sl.badges.join(', ')}]` : ''}`,
-      );
+      // No URL upstream means none here: a link built from the site code would be content[]-only.
+      const title = sl.url ? markdownLink(sl.title, sl.url) : escapeMarkdownInline(sl.title);
+      lines.push(`**${code}:** ${title}${sl.badges?.length ? ` [${sl.badges.join(', ')}]` : ''}`);
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

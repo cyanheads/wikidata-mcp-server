@@ -81,6 +81,25 @@ describe('Markdown data fidelity', () => {
     expect(labels.text).toContain(multiline);
   });
 
+  it('preserves invalid label-request entries as sent, without injecting blocks', () => {
+    const result = parsed(
+      wikidataGetLabels.format!({
+        entities: {},
+        found: 0,
+        notFound: [],
+        invalid: [multiline, hostile],
+        deferredIds: ['Q501'],
+        languages: ['en'],
+      }),
+    );
+    expect(result.text).toContain(multiline);
+    expect(result.text).toContain(hostile);
+    expect(result.text).toContain('Q501');
+    expect(result.inline.some((token) => token.type === 'html_inline')).toBe(false);
+    expect(result.tokens.some((token) => token.type === 'heading_open')).toBe(false);
+    expect(result.tokens.some((token) => token.type === 'bullet_list_open')).toBe(false);
+  });
+
   it('preserves a sitelink title and destination and refuses non-HTTP links', () => {
     const result = parsed(
       wikidataGetSitelinks.format!({
@@ -109,6 +128,9 @@ describe('Markdown data fidelity', () => {
         kind: 'full',
         propertyCount: 1,
         statementCount: 1,
+        propertyTotals: { P1: 1 },
+        returnedCount: 1,
+        rank: 'all',
         labelsResolved: false,
         statements: {
           P1: [
@@ -127,12 +149,44 @@ describe('Markdown data fidelity', () => {
     expect(result.text.split(multiline)).toHaveLength(4);
   });
 
+  it('preserves property labels beside statement, qualifier, reference, and property-value P-IDs', () => {
+    const result = parsed(
+      wikidataGetStatements.format!({
+        id: 'Q1',
+        kind: 'full',
+        propertyCount: 1,
+        statementCount: 1,
+        propertyTotals: { P1: 1 },
+        returnedCount: 1,
+        rank: 'all',
+        labelsResolved: true,
+        propertyLabels: { P1: hostile, P2: hostile, P3: hostile, P4: hostile },
+        statements: {
+          P1: [
+            {
+              id: 'Q1$1',
+              property: 'P1',
+              rank: 'normal',
+              value: { type: 'entity-id', entityType: 'property', id: 'P4' },
+              qualifiers: [{ property: 'P2', value: { type: 'string', value: 'q' } }],
+              references: [{ parts: [{ property: 'P3', value: { type: 'string', value: 'r' } }] }],
+            },
+          ],
+        },
+      }),
+    );
+    expect(result.text.split(hostile)).toHaveLength(5);
+    expect(result.inline.some((token) => token.type === 'html_inline')).toBe(false);
+    expect(result.inline.some((token) => token.type === 'link_open')).toBe(false);
+    expect(result.tokens.filter((token) => token.type === 'heading_open')).toHaveLength(2);
+  });
+
   it('preserves resolver values and labels', () => {
     const result = parsed(
       wikidataResolveExternalId.format!({
         property: 'P356',
         value: hostile,
-        match: { id: 'Q1', label: multiline, description: multiline, url },
+        match: { id: 'Q1', label: multiline, description: multiline, url, rank: 'normal' },
       }),
     );
     expect(result.text).toContain(hostile);
@@ -187,7 +241,6 @@ describe('Markdown data fidelity', () => {
     const result = parsed(
       wikidataSparqlQuery.format!({
         variables: ['value'],
-        truncated: false,
         results: [{ value: { type: 'literal', value: hostile } }],
       }),
     );
@@ -208,7 +261,6 @@ describe('Markdown data fidelity', () => {
     const result = parsed(
       wikidataSparqlQuery.format!({
         variables: ['uri', 'literal', 'compact', 'other'],
-        truncated: false,
         results: [
           {
             uri: { type: 'uri', value: uri },

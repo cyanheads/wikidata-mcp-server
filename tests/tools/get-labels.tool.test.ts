@@ -5,16 +5,46 @@
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataGetLabels } from '@/mcp-server/tools/definitions/get-labels.tool.js';
 import { inlineText } from '../helpers/markdown.js';
 
 const mockFetchLabels = vi.fn();
 
-vi.mock('@/services/wikidata/wikidata-rest-service.js', () => ({
+/**
+ * Stub only the service accessor — the I/O boundary. `normalizeId` stays real, so these tests
+ * run the production ID normalizer (entity URI and `wd:` forms included).
+ */
+vi.mock('@/services/wikidata/wikidata-rest-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/wikidata/wikidata-rest-service.js')>()),
   getWikidataRestService: () => ({ fetchLabels: mockFetchLabels }),
-  normalizeId: (id: string) => id.toUpperCase(),
 }));
+
+/** `count` distinct Q-IDs starting at Q`from`. */
+const qids = (count: number, from = 1) => Array.from({ length: count }, (_, i) => `Q${from + i}`);
+
+/** Echoes every requested ID as a resolved entity, the way wbgetentities answers. */
+const resolveAll = () =>
+  mockFetchLabels.mockImplementation(async (ids: string[]) =>
+    Object.fromEntries(ids.map((id) => [id, { labels: { en: `label ${id}` }, descriptions: {} }])),
+  );
+
+type LabelsStructured = {
+  entities: Record<string, { labels: Record<string, string> }>;
+  found: number;
+  notFound: string[];
+  invalid?: string[];
+  deferredIds?: string[];
+  languages: string[];
+  notice?: string;
+};
+const structuredOf = (result: { structuredContent?: unknown }) =>
+  result.structuredContent as LabelsStructured;
+const textOf = (result: { content: unknown[] }) =>
+  result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+const errorCodeOf = (result: { structuredContent?: unknown }) =>
+  (result.structuredContent as { error: { code: number } }).error.code;
 
 describe('wikidataGetLabels', () => {
   beforeEach(() => {
@@ -67,12 +97,215 @@ describe('wikidataGetLabels', () => {
     expect(result.entities.P31!.labels.en).toBe('instance of');
   });
 
-  it('throws invalid_ids for malformed IDs', async () => {
-    const ctx = createMockContext({ errors: wikidataGetLabels.errors });
-    const input = wikidataGetLabels.input.parse({ ids: ['Q76', 'notanid'] });
-    await expect(wikidataGetLabels.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_ids' },
+  /** #55: one malformed entry rejected every valid one; it now lands in `invalid`. */
+  it('resolves the valid IDs and lists a malformed entry in invalid, as sent', async () => {
+    mockFetchLabels.mockResolvedValue({
+      Q76: { labels: { en: 'Barack Obama' }, descriptions: {} },
+      P31: { labels: { en: 'instance of' }, descriptions: {} },
     });
+
+    const result = await runToolContract(wikidataGetLabels, { ids: ['Q76', 'P31', 'notanid'] });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockFetchLabels).toHaveBeenCalledWith(['Q76', 'P31'], ['en'], expect.anything());
+    const structured = structuredOf(result);
+    expect(structured.found).toBe(2);
+    expect(structured.invalid).toEqual(['notanid']);
+    expect(structured.notFound).toEqual([]);
+    expect(structured.deferredIds).toBeUndefined();
+    expect(textOf(result)).toContain('**Invalid:** notanid');
+  });
+
+  it('raises invalid_ids only when no valid ID remains', async () => {
+    const result = await runToolContract(wikidataGetLabels, { ids: ['notanid'] });
+
+    expect(result.isError).toBe(true);
+    const error = (
+      result.structuredContent as {
+        error: { code: number; data: { reason: string; recovery: { hint: string } } };
+      }
+    ).error;
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data.reason).toBe('invalid_ids');
+    expect(error.data.recovery.hint).toContain('wd:');
+    expect(mockFetchLabels).not.toHaveBeenCalled();
+  });
+
+  it('echoes each malformed entry once, as sent, keeping valid duplicates to one lookup', async () => {
+    mockFetchLabels.mockResolvedValue({});
+
+    const result = await runToolContract(wikidataGetLabels, {
+      ids: ['Q1', ' q1 ', 'bad one', 'bad one', 'Bad One', 'Q1'],
+    });
+
+    expect(mockFetchLabels).toHaveBeenCalledWith(['Q1'], ['en'], expect.anything());
+    const structured = structuredOf(result);
+    expect(structured.invalid).toEqual(['bad one', 'Bad One']);
+    expect(structured.notFound).toEqual(['Q1']);
+  });
+
+  /** #55: the forms wikidata_sparql_query returns resolve without a rewrite by the caller. */
+  it('resolves entity URIs and wd: forms to their bare IDs', async () => {
+    resolveAll();
+
+    const result = await runToolContract(wikidataGetLabels, {
+      ids: ['http://www.wikidata.org/entity/Q42', 'wd:P31', 'https://www.wikidata.org/entity/Q76'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockFetchLabels).toHaveBeenCalledWith(['Q42', 'P31', 'Q76'], ['en'], expect.anything());
+    expect(Object.keys(structuredOf(result).entities)).toEqual(['Q42', 'P31', 'Q76']);
+    expect(structuredOf(result).invalid).toBeUndefined();
+  });
+
+  /** #14 wiring: unassigned and out-of-range IDs go to notFound beside the valid members. */
+  it('reports unassigned and out-of-range IDs in notFound without dropping valid members', async () => {
+    mockFetchLabels.mockResolvedValue({
+      Q76: { labels: { en: 'Barack Obama' }, descriptions: {} },
+    });
+
+    const result = await runToolContract(wikidataGetLabels, {
+      ids: ['Q76', 'Q99999999', 'Q999999999999'],
+    });
+
+    expect(structuredOf(result).found).toBe(1);
+    expect(structuredOf(result).notFound).toEqual(['Q99999999', 'Q999999999999']);
+    expect(textOf(result)).toContain('**Not found:** Q99999999, Q999999999999');
+  });
+
+  /** #55: the per-call cap is 500 distinct IDs; the rest are named, not rejected. */
+  describe('500-ID cap', () => {
+    it('resolves the first 500 distinct IDs and returns the 501st in deferredIds', async () => {
+      resolveAll();
+
+      const result = await runToolContract(wikidataGetLabels, { ids: qids(501) });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockFetchLabels).toHaveBeenCalledTimes(1);
+      expect(mockFetchLabels.mock.calls[0]?.[0]).toEqual(qids(500));
+      const structured = structuredOf(result);
+      expect(structured.found).toBe(500);
+      expect(structured.deferredIds).toEqual(['Q501']);
+      // Q501 was never looked up, so it is deferred, not missing.
+      expect(structured.notFound).toEqual([]);
+      expect(structured.notice).toBe(
+        'Resolved the first 500 of 501 distinct IDs, the per-call cap. Call again with the 1 in deferredIds for the rest.',
+      );
+      const text = textOf(result);
+      expect(text).toContain('**Deferred:** Q501');
+      expect(text).toContain(`> ${structured.notice}`);
+    });
+
+    it('keeps deferredIds in input order and counts duplicates once toward the cap', async () => {
+      resolveAll();
+      // 500 distinct IDs, each sent twice, then three more distinct IDs in reverse order.
+      const ids = [...qids(500), ...qids(500), 'Q9003', 'Q9002', 'Q9001'];
+
+      const result = await runToolContract(wikidataGetLabels, { ids });
+
+      expect(mockFetchLabels.mock.calls[0]?.[0]).toEqual(qids(500));
+      expect(structuredOf(result).deferredIds).toEqual(['Q9003', 'Q9002', 'Q9001']);
+      expect(structuredOf(result).notice).toBe(
+        'Resolved the first 500 of 503 distinct IDs, the per-call cap. Call again with the 3 in deferredIds for the rest.',
+      );
+    });
+
+    it('serves exactly 500 distinct IDs, duplicates included, with no deferral or notice', async () => {
+      resolveAll();
+
+      const result = await runToolContract(wikidataGetLabels, { ids: [...qids(500), 'Q1', 'Q2'] });
+
+      expect(mockFetchLabels.mock.calls[0]?.[0]).toEqual(qids(500));
+      expect(structuredOf(result).deferredIds).toBeUndefined();
+      expect(structuredOf(result).notice).toBeUndefined();
+    });
+
+    it('does not count malformed entries toward the cap', async () => {
+      resolveAll();
+
+      const result = await runToolContract(wikidataGetLabels, {
+        ids: [...qids(500), 'nope', 'also nope'],
+      });
+
+      expect(structuredOf(result).deferredIds).toBeUndefined();
+      expect(structuredOf(result).invalid).toEqual(['nope', 'also nope']);
+    });
+
+    it('accepts 10,000 entries and rejects 10,001 as invalid arguments', async () => {
+      resolveAll();
+
+      const atCeiling = await runToolContract(wikidataGetLabels, { ids: qids(10_000) });
+      expect(atCeiling.isError).toBeFalsy();
+      expect(structuredOf(atCeiling).deferredIds).toHaveLength(9_500);
+
+      mockFetchLabels.mockClear();
+      const over = await runToolContract(wikidataGetLabels, { ids: qids(10_001) });
+      expect(over.isError).toBe(true);
+      expect(errorCodeOf(over)).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(mockFetchLabels).not.toHaveBeenCalled();
+    });
+
+    describe('with WIKIDATA_CLAMP_LIMITS=false', () => {
+      afterEach(() => {
+        vi.unstubAllEnvs();
+      });
+
+      /** Imports the tool fresh, so the lazily parsed server config re-reads the stubbed env. */
+      const loadTool = async () => {
+        vi.resetModules();
+        return (await import('@/mcp-server/tools/definitions/get-labels.tool.js'))
+          .wikidataGetLabels;
+      };
+
+      it('rejects 501 distinct IDs naming the cap, before any lookup', async () => {
+        vi.stubEnv('WIKIDATA_CLAMP_LIMITS', 'false');
+        const tool = await loadTool();
+
+        const result = await runToolContract(tool, { ids: qids(501) });
+
+        expect(result.isError).toBe(true);
+        const error = (result.structuredContent as { error: { code: number; message: string } })
+          .error;
+        expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(error.message).toContain('500');
+        expect(mockFetchLabels).not.toHaveBeenCalled();
+      });
+
+      it('still serves 500 distinct IDs', async () => {
+        vi.stubEnv('WIKIDATA_CLAMP_LIMITS', 'false');
+        const tool = await loadTool();
+        resolveAll();
+
+        const result = await runToolContract(tool, { ids: qids(500) });
+
+        expect(result.isError).toBeFalsy();
+        expect(structuredOf(result).found).toBe(500);
+      });
+    });
+  });
+
+  /** #55: wbgetentities refuses a 51st language (`toomanyvalues`); the schema stops it first. */
+  it('accepts 50 languages and rejects 51 as invalid arguments', async () => {
+    mockFetchLabels.mockResolvedValue({});
+    /** `n` distinct well-formed codes: xaa, xba, … */
+    const letter = (n: number) => String.fromCharCode(97 + n);
+    const languages = (n: number) =>
+      Array.from({ length: n }, (_, i) => `x${letter(i % 26)}${letter(Math.floor(i / 26))}`);
+
+    const fifty = await runToolContract(wikidataGetLabels, {
+      ids: ['Q1'],
+      languages: languages(50),
+    });
+    expect(fifty.isError).toBeFalsy();
+    expect(mockFetchLabels.mock.calls[0]?.[1]).toHaveLength(50);
+
+    mockFetchLabels.mockClear();
+    const fiftyOne = await runToolContract(wikidataGetLabels, {
+      ids: ['Q1'],
+      languages: languages(51),
+    });
+    expect(fiftyOne.isError).toBe(true);
+    expect(errorCodeOf(fiftyOne)).toBe(JsonRpcErrorCode.InvalidParams);
     expect(mockFetchLabels).not.toHaveBeenCalled();
   });
 
@@ -248,14 +481,19 @@ describe('wikidataGetLabels', () => {
     expect(() => wikidataGetLabels.input.parse({ ids: [] })).toThrow();
   });
 
-  it('input validation: too many IDs (51) is rejected by Zod', () => {
-    const ids = Array.from({ length: 51 }, (_, i) => `Q${i + 1}`);
-    expect(() => wikidataGetLabels.input.parse({ ids })).toThrow();
-  });
+  /** #55: 51 IDs used to reject the whole call; up to 50 return what they always did. */
+  it('input validation: 51 IDs pass the schema, and 50 return no invalid or deferred fields', async () => {
+    resolveAll();
+    expect(() => wikidataGetLabels.input.parse({ ids: qids(51) })).not.toThrow();
 
-  it('input validation: all IDs valid at max batch size (50)', () => {
-    const ids = Array.from({ length: 50 }, (_, i) => `Q${i + 1}`);
-    expect(() => wikidataGetLabels.input.parse({ ids })).not.toThrow();
+    const result = await runToolContract(wikidataGetLabels, { ids: qids(50) });
+    expect(Object.keys(structuredOf(result)).sort()).toEqual([
+      'entities',
+      'found',
+      'languages',
+      'notFound',
+    ]);
+    expect(structuredOf(result).found).toBe(50);
   });
 
   it('normalizes lowercase IDs before validation', async () => {
@@ -264,7 +502,6 @@ describe('wikidataGetLabels', () => {
     });
 
     const ctx = createMockContext({ errors: wikidataGetLabels.errors });
-    // normalizeId is mocked to uppercase
     const input = wikidataGetLabels.input.parse({ ids: ['q76'] });
     const result = await wikidataGetLabels.handler(input, ctx);
 
@@ -272,13 +509,19 @@ describe('wikidataGetLabels', () => {
     expect(mockFetchLabels).toHaveBeenCalledWith(['Q76'], ['en'], expect.anything());
   });
 
-  it('security: injection attempt in IDs array is rejected as invalid', async () => {
-    const ctx = createMockContext({ errors: wikidataGetLabels.errors });
-    const input = wikidataGetLabels.input.parse({ ids: ['Q76', '"; DROP TABLE; --'] });
-    await expect(wikidataGetLabels.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_ids' },
+  it('security: an injection attempt never reaches the lookup and renders as literal text', async () => {
+    mockFetchLabels.mockResolvedValue({
+      Q76: { labels: { en: 'Barack Obama' }, descriptions: {} },
     });
-    expect(mockFetchLabels).not.toHaveBeenCalled();
+    const injection = '"; DROP TABLE; -- *x* [a](javascript:alert)';
+
+    const result = await runToolContract(wikidataGetLabels, { ids: ['Q76', injection] });
+
+    expect(mockFetchLabels).toHaveBeenCalledWith(['Q76'], ['en'], expect.anything());
+    expect(structuredOf(result).invalid).toEqual([injection]);
+    const text = textOf(result);
+    expect(text).toContain(escapeMarkdownInline(injection));
+    expect(text).not.toContain('*x*');
   });
 
   it('security: no env secret appears in labels output', async () => {

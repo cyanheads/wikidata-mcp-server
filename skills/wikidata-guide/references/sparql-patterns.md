@@ -4,7 +4,7 @@ Use these patterns with `wikidata_sparql_query`. Resolve and verify the IDs appr
 
 ## Namespaces and direct claims
 
-`wd:` names entities; `wdt:` reads direct, truthy claims. Truthy claims use the best non-deprecated rank for each subject/property: preferred statements when any exist, otherwise normal statements. They omit qualifiers and references. “Truthy” is a rank-selection rule, not a guarantee of factual truth.
+`wd:` names entities; `wdt:` reads direct, truthy claims. Truthy claims use the best non-deprecated rank for each subject/property: preferred statements when any exist, otherwise normal statements. They omit qualifiers and references. “Truthy” is a rank-selection rule, not a guarantee of factual truth. `wikidata_get_statements` with `rank: "best"` returns the same statements, with their qualifiers and references.
 
 ```sparql
 SELECT ?occupation ?occupationLabel WHERE {
@@ -48,6 +48,23 @@ LIMIT 20
 
 Replace the seed VALUES with a selective task-specific relationship when expanding beyond known items.
 
+## Scholarly articles
+
+Scholarly articles, and every triple they own (DOI, PMID, authorship), live in a separate graph. A query reaches them only inside `SERVICE wdsubgraph:scholarly_articles { … }`; `wdsubgraph:` is predeclared. For a single DOI or PMID, `wikidata_resolve_external_id` is the shorter route: it searches both graphs.
+
+The label SERVICE the server injects runs on the main graph, so it cannot label an article. Read the article's label inside the block: `BIND(?paperLabel AS ?paperLabel)` and a label SERVICE there. Without the `BIND` the label comes back unbound. A query that writes its own label SERVICE gets none injected, so add a top-level one when the query also needs main-graph labels.
+
+```sparql
+SELECT ?paper ?paperLabel WHERE {
+  SERVICE wdsubgraph:scholarly_articles {
+    ?paper wdt:P356 "10.1038/NATURE14539" .
+    BIND(?paperLabel AS ?paperLabel)
+    SERVICE wikibase:label { bd:serviceParam wikibase:language "en" . }
+  }
+}
+LIMIT 5
+```
+
 ## Counts and pages
 
 Count distinct entities when joins can produce several rows per entity. This example counts occupation values, not people or all statement ranks:
@@ -58,7 +75,7 @@ SELECT (COUNT(DISTINCT ?occupation) AS ?count) WHERE {
 }
 ```
 
-For row retrieval, add `ORDER BY` over keys that distinguish the projected rows, then `LIMIT` and `OFFSET`. Advance by the page requested only when that page was fully returned. If the response reports a budget cut, reduce the page size and re-run that page before advancing; otherwise an OFFSET jump can skip unseen rows. Separate requests do not share a snapshot of the changing graph.
+For row retrieval, add `ORDER BY` over keys that distinguish the projected rows, then `LIMIT` and `OFFSET`. A call returns at most 4,000 rows, so use a LIMIT of at most 4,000 and advance OFFSET by the LIMIT. A result with more rows than that comes back as its first 4,000 with `truncated`, `shown`, `cap`, and a notice. Rather than treating those rows as the whole set, narrow the conditions or aggregate, and page with ORDER BY, LIMIT, and OFFSET only a result not much larger than 4,000 rows. Separate requests do not share a snapshot of the changing graph.
 
 ```sparql
 SELECT DISTINCT ?occupation WHERE {
@@ -69,7 +86,7 @@ LIMIT 20
 OFFSET 0
 ```
 
-The response's `totalCount` counts rows produced by that execution before the response-budget cut. It is not the count of every match beyond the query's LIMIT or an upstream cap. `returnedCount` reports what reached the caller. Check both the notice and `truncated` before using rows as a complete set.
+The response's `totalCount` counts the rows that execution produced, and appears only when the whole result was read. It is not the count of every match beyond the query's LIMIT, and a truncated result carries none. Check the notice and `truncated` before using rows as a complete set.
 
 ## Official references
 

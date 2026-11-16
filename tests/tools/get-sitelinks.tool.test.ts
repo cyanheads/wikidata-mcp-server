@@ -232,19 +232,182 @@ describe('wikidataGetSitelinks', () => {
     expect(text).toContain('Q17437798');
   });
 
-  it('format: constructs fallback URL when url is absent', () => {
-    const output = {
-      id: 'Q76',
-      sitelinks: {
-        frwiki: { title: 'Barack Obama' }, // no url
+  /**
+   * #52: a Wikipedia edition is known by its own URL's host, not by a site code ending in "wiki"
+   * — ten non-Wikipedia codes end that way, and underscore codes name hyphenated hosts.
+   */
+  describe('Wikipedia edition test', () => {
+    const fixture = {
+      enwiki: { title: 'Lion', url: 'https://en.wikipedia.org/wiki/Lion' },
+      be_x_oldwiki: { title: 'Леў', url: 'https://be-tarask.wikipedia.org/wiki/Леў' },
+      zh_min_nanwiki: { title: 'Sai', url: 'https://zh-min-nan.wikipedia.org/wiki/Sai' },
+      commonswiki: {
+        title: 'Panthera leo',
+        url: 'https://commons.wikimedia.org/wiki/Panthera_leo',
+        badges: ['Q17437796'],
       },
-      count: 1,
+      specieswiki: {
+        title: 'Panthera leo',
+        url: 'https://species.wikimedia.org/wiki/Panthera_leo',
+      },
+      wikidatawiki: { title: 'Q140', url: 'https://www.wikidata.org/wiki/Q140' },
+      wikifunctionswiki: { title: 'Z1', url: 'https://www.wikifunctions.org/wiki/Z1' },
+      enwikiquote: { title: 'Lions', url: 'https://en.wikiquote.org/wiki/Lions' },
     };
-    const blocks = wikidataGetSitelinks.format!(output);
-    const text = (blocks[0] as { text: string }).text;
-    // Falls back to constructed URL from site code
-    expect(text).toContain('frwiki');
-    expect(text).toContain('Barack Obama');
+    const call = (args: Record<string, unknown>) =>
+      runToolContract(wikidataGetSitelinks, args as never);
+    type Structured = {
+      count: number;
+      sitelinks: Record<string, { title: string; url?: string; badges?: string[] }>;
+      message?: string;
+    };
+    const structuredOf = (result: { structuredContent?: unknown }) =>
+      result.structuredContent as Structured;
+    const textOf = (result: { content: unknown[] }) =>
+      result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+
+    it('wikis_only keeps exactly the Wikipedia editions, underscore codes included', async () => {
+      mockFetchSitelinks.mockResolvedValue(fixture);
+
+      const result = await call({ id: 'Q140', wikis_only: true });
+
+      expect(Object.keys(structuredOf(result).sitelinks)).toEqual([
+        'enwiki',
+        'be_x_oldwiki',
+        'zh_min_nanwiki',
+      ]);
+      expect(structuredOf(result).count).toBe(3);
+      expect(textOf(result)).not.toContain('commons.wikimedia.org');
+    });
+
+    it('returns every sitelink unchanged without wikis_only or sites, url and badges included', async () => {
+      // A copy taken before the call, so a handler that edits what upstream sent cannot pass.
+      const expected = structuredClone(fixture);
+      mockFetchSitelinks.mockResolvedValue(structuredClone(fixture));
+
+      const result = await call({ id: 'Q140' });
+
+      expect(structuredOf(result).sitelinks).toEqual(expected);
+      expect(structuredOf(result).count).toBe(8);
+      expect(structuredOf(result).sitelinks.commonswiki?.badges).toEqual(['Q17437796']);
+      expect(textOf(result)).toContain('[Q17437796]');
+    });
+
+    it('an item whose only sitelink is mediawikiwiki has none under wikis_only', async () => {
+      mockFetchSitelinks.mockResolvedValue({
+        mediawikiwiki: {
+          title: 'Extension:SecurePHP',
+          url: 'https://www.mediawiki.org/wiki/Extension:SecurePHP',
+        },
+      });
+
+      const result = await call({ id: 'Q123014743', wikis_only: true });
+
+      expect(structuredOf(result).count).toBe(0);
+      expect(structuredOf(result).message).toBe(
+        'Q123014743 has no Wikipedia (wikis_only) sitelinks.',
+      );
+    });
+
+    it('says a requested sitelink is not a Wikipedia edition rather than not found', async () => {
+      mockFetchSitelinks.mockResolvedValue({ commonswiki: fixture.commonswiki });
+
+      const result = await call({ id: 'Q140', sites: ['commonswiki'], wikis_only: true });
+
+      expect(structuredOf(result).count).toBe(0);
+      const message = structuredOf(result).message ?? '';
+      expect(message).toContain('commonswiki');
+      expect(message).toContain('not a Wikipedia edition');
+      expect(message).not.toContain('found');
+      expect(textOf(result)).toContain('not a Wikipedia edition');
+    });
+
+    it('names every requested sitelink that is not a Wikipedia edition', async () => {
+      mockFetchSitelinks.mockResolvedValue({
+        commonswiki: fixture.commonswiki,
+        specieswiki: fixture.specieswiki,
+      });
+
+      const result = await call({
+        id: 'Q140',
+        sites: ['commonswiki', 'specieswiki'],
+        wikis_only: true,
+      });
+
+      expect(structuredOf(result).count).toBe(0);
+      expect(structuredOf(result).message).toBe(
+        'The requested sitelinks commonswiki, specieswiki on Q140 are not Wikipedia editions; wikis_only returns Wikipedia editions only.',
+      );
+      expect(textOf(result)).toContain('commonswiki, specieswiki');
+      expect(textOf(result)).toContain('are not Wikipedia editions');
+    });
+
+    it('keeps the requested Wikipedia edition when sites and wikis_only are combined', async () => {
+      mockFetchSitelinks.mockResolvedValue({
+        enwiki: fixture.enwiki,
+        commonswiki: fixture.commonswiki,
+      });
+
+      const result = await call({ id: 'Q140', sites: ['enwiki', 'commonswiki'], wikis_only: true });
+
+      expect(Object.keys(structuredOf(result).sitelinks)).toEqual(['enwiki']);
+      expect(structuredOf(result).message).toBeUndefined();
+    });
+
+    it('excludes an entry without url from wikis_only, sorts it last, and renders it unlinked', async () => {
+      mockFetchSitelinks.mockResolvedValue({
+        frwiki: { title: 'Lion' },
+        commonswiki: fixture.commonswiki,
+        enwiki: fixture.enwiki,
+      });
+
+      const only = await call({ id: 'Q140', wikis_only: true });
+      expect(Object.keys(structuredOf(only).sitelinks)).toEqual(['enwiki']);
+
+      const all = await call({ id: 'Q140' });
+      const lines = textOf(all)
+        .split('\n')
+        .filter((line) => line.startsWith('**') && line.includes(':** '));
+      expect(lines.map((line) => line.slice(2, line.indexOf(':**')))).toEqual([
+        'Count',
+        'enwiki',
+        'frwiki',
+        'commonswiki',
+      ]);
+      expect(lines).toContain('**frwiki:** Lion');
+      // Every URL in content[] is one structuredContent carries.
+      const structuredUrls = Object.values(structuredOf(all).sitelinks).flatMap((s) =>
+        s.url ? [s.url] : [],
+      );
+      const renderedUrls = [...textOf(all).matchAll(/\]\(<?([^)>]+)>?\)/g)].map((m) => m[1]);
+      expect(renderedUrls.sort()).toEqual(structuredUrls.sort());
+      expect(textOf(all)).not.toContain('fr.wikipedia.org');
+    });
+
+    it('sorts Wikipedia editions first by URL host, keeping upstream order within each group', () => {
+      const blocks = wikidataGetSitelinks.format!({
+        id: 'Q140',
+        count: 4,
+        sitelinks: {
+          commonswiki: fixture.commonswiki,
+          enwiki: fixture.enwiki,
+          enwikiquote: fixture.enwikiquote,
+          be_x_oldwiki: fixture.be_x_oldwiki,
+        },
+      });
+      const codes = (blocks[0] as { text: string }).text
+        .split('\n')
+        .filter((line) => /^\*\*[a-z_]+:\*\* /.test(line))
+        .map((line) => line.slice(2, line.indexOf(':**')));
+
+      expect(codes).toEqual(['enwiki', 'be_x_oldwiki', 'commonswiki', 'enwikiquote']);
+    });
+
+    it('describes wikis_only without the site-code suffix test', () => {
+      const description = wikidataGetSitelinks.input.shape.wikis_only.description ?? '';
+      expect(description).not.toMatch(/ending in/i);
+      expect(description).toContain('wikipedia.org');
+    });
   });
 
   it('re-throws service errors that are not a not-found', async () => {

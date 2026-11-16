@@ -2,8 +2,8 @@
 
 **Server:** @cyanheads/wikidata-mcp-server
 **Version:** 0.3.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
@@ -15,7 +15,7 @@
 
 **Services:** `wikidata-rest-service` (REST API v1 + MediaWiki batch), `wikidata-sparql-service` (SPARQL with auto-prefix injection)
 
-**Config env vars:** `WIKIDATA_USER_AGENT`, `WIKIDATA_SPARQL_TIMEOUT_MS`, `WIKIDATA_REST_TIMEOUT_MS`
+**Config env vars:** `WIKIDATA_USER_AGENT`, `WIKIDATA_SPARQL_TIMEOUT_MS`, `WIKIDATA_REST_TIMEOUT_MS`, `WIKIDATA_CLAMP_LIMITS`
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -217,10 +217,12 @@ src/
     wikidata/
       wikidata-rest-service.ts          # REST API v1 and MediaWiki batch labels
       wikidata-sparql-service.ts        # Query Service client and prefix injection
+      sparql-results-scanner.ts         # Incremental SPARQL JSON reader: row ceiling, timeout trailer
       types.ts                          # Domain types
   mcp-server/
     tools/definitions/
       *.tool.ts                          # Seven Wikidata tool definitions
+    tools/count-limit.ts                 # Per-call caps: clamp with a notice, or reject (WIKIDATA_CLAMP_LIMITS)
     tools/language-code.ts               # Shared language/languages input schemas
     tools/statement-format.ts            # Shared markdown rendering of normalized statements
     tools/utf8-bytes.ts                  # UTF-8 byte length, the unit of every response budget

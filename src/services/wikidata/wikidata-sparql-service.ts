@@ -14,12 +14,125 @@ import {
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
+import { SparqlResultsScanner } from './sparql-results-scanner.js';
 import type { SparqlResponse } from './types.js';
 
-const SPARQL_ENDPOINT = 'https://query.wikidata.org/sparql';
+/**
+ * Query Service endpoint per graph. Since the WDQS graph split, scholarly articles and every
+ * triple they own live only in the scholarly graph; each endpoint answers labels from its own graph.
+ */
+export const SPARQL_ENDPOINTS = {
+  main: 'https://query.wikidata.org/sparql',
+  scholarly: 'https://query-scholarly.wikidata.org/sparql',
+} as const;
 
-/** Returns true if the response body is an HTML page (rate-limit or maintenance page). */
-const isHtmlResponse = (text: string): boolean => /^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text);
+/** A Query Service graph a query can run against. */
+export type SparqlGraph = keyof typeof SPARQL_ENDPOINTS;
+
+/** Per-call options for {@link WikidataSparqlService.query}. */
+export interface SparqlQueryOptions {
+  /** The graph to query. Default `'main'`. */
+  graph?: SparqlGraph;
+  /**
+   * Most rows to return. The result is read one binding at a time; after `maxRows + 1` the read
+   * stops, the request is aborted, and the result reports `stoppedEarly`. Unset reads every row.
+   */
+  maxRows?: number;
+}
+
+/** A query's result: the SPARQL 1.1 JSON document, plus whether the read stopped at `maxRows`. */
+export interface SparqlQueryResult extends SparqlResponse {
+  /**
+   * True when the result had more than `maxRows` rows: the read stopped after `maxRows + 1`
+   * bindings, the request was aborted, and `results.bindings` holds the first `maxRows`.
+   */
+  stoppedEarly: boolean;
+}
+
+/**
+ * Most bytes of a 200 result body one call reads, whatever its row count — the row ceiling bounds
+ * how many rows a call keeps, this bounds the body they arrive in. About 2 KB of the Query
+ * Service's pretty-printed JSON per row at the 4,000-row ceiling.
+ */
+const RESULT_BODY_LIMIT_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Reads a 200 response body through a {@link SparqlResultsScanner}. When the scanner needs no
+ * more — `maxRows + 1` rows read, or a body already known not to be a result — the reader is
+ * cancelled, which aborts the request. A body that passes {@link RESULT_BODY_LIMIT_BYTES} first
+ * is cancelled the same way and fails as `result_too_large`.
+ */
+async function readResults(
+  response: Response,
+  maxRows: number | undefined,
+): Promise<SparqlQueryResult> {
+  const scanner = new SparqlResultsScanner(maxRows);
+  if (response.body) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let received = 0;
+    for (;;) {
+      const { done, value } = await network(() => reader.read());
+      if (done) {
+        scanner.push(decoder.decode());
+        break;
+      }
+      received += value.byteLength;
+      if (received > RESULT_BODY_LIMIT_BYTES) {
+        await reader.cancel();
+        throw validationError(
+          'The SPARQL result is larger than the 8 MiB one call reads. Lower the LIMIT, project fewer variables, or aggregate in the query.',
+          { reason: 'result_too_large', limitBytes: RESULT_BODY_LIMIT_BYTES },
+        );
+      }
+      if (!scanner.push(decoder.decode(value, { stream: true }))) {
+        await reader.cancel();
+        break;
+      }
+    }
+  }
+  const outcome = scanner.finish();
+  switch (outcome.kind) {
+    case 'rows':
+      return {
+        head: outcome.head,
+        results: { bindings: outcome.bindings },
+        stoppedEarly: outcome.stoppedEarly,
+      };
+    case 'html':
+      throw serviceUnavailable(
+        'SPARQL endpoint returned HTML — likely rate-limited or under maintenance.',
+      );
+    case 'timeout':
+      throw timeout(
+        "SPARQL query exceeded the Query Service's 60s limit, which discards a partial result. Narrow the WHERE clause, add or lower the LIMIT, or simplify the query.",
+        { reason: 'timeout' },
+      );
+    case 'malformed':
+      throw serviceUnavailable(
+        'Wikidata SPARQL endpoint returned an incomplete or malformed result.',
+      );
+  }
+}
+
+/**
+ * Runs one network step of a request — the fetch, or a body read. `fetch` and the body reader
+ * reject with a `TypeError` when the connection cannot be made or is lost, which is the endpoint
+ * not answering: ServiceUnavailable. Cancellation and the deadline reject with their abort reason
+ * and pass through untouched.
+ */
+async function network<T>(step: () => Promise<T>): Promise<T> {
+  try {
+    return await step();
+  } catch (err) {
+    if (err instanceof TypeError) {
+      throw serviceUnavailable('Could not reach the Wikidata SPARQL endpoint.', undefined, {
+        cause: err,
+      });
+    }
+    throw err;
+  }
+}
 
 /** Common SPARQL prefixes pre-pended to every query. */
 const SPARQL_PREFIXES = `PREFIX wd: <http://www.wikidata.org/entity/>
@@ -92,19 +205,48 @@ function declaresLabelService(query: string): boolean {
   return false;
 }
 
+/** Most characters of a page title or plain-text error body an error message carries. */
+const ERROR_TEXT_LIMIT = 200;
+
 /**
- * Extract the human-readable cause from a Blazegraph Java stack trace.
- * Stack traces look like:
+ * The text of an HTML page's `<title>`, whitespace collapsed; undefined when it has none. Found
+ * with two literal searches and one `indexOf`, so the scan is linear in the page length.
+ */
+function htmlTitle(html: string): string | undefined {
+  const open = /<title[\s>]/i.exec(html);
+  if (!open) return;
+  const start = html.indexOf('>', open.index) + 1;
+  if (start === 0) return;
+  const close = /<\/title/gi;
+  close.lastIndex = start;
+  const end = close.exec(html)?.index;
+  if (end === undefined) return;
+  return html.slice(start, end).replace(/\s+/g, ' ').trim().slice(0, ERROR_TEXT_LIMIT) || undefined;
+}
+
+/**
+ * What a 400 or 422 body says: a report on the query, or a proxy's error page.
+ *
+ * Blazegraph reports a query in a Java stack trace:
  *   org.openrdf.query.MalformedQueryException: <reason>
  *   ... (stack frames)
+ *
+ * A body with no exception line comes from a proxy in front of the Query Service. Plain text is
+ * still about the request (its first characters are the cause); an HTML page is the proxy's own
+ * error page, known only by its title — never its markup.
  */
-function extractSparqlError(body: string): string {
-  // Prefer specific exception types, then fall back to any Exception, then raw body
+function readErrorBody(
+  body: string,
+  status: number,
+): { kind: 'query'; cause: string } | { kind: 'page'; title: string | undefined } {
+  // Prefer specific exception types, then fall back to any Exception, then the body itself
   const match =
     /MalformedQueryException:\s*(.+?)(?:\r?\n|$)/.exec(body) ??
     /QueryEvaluationException:\s*(.+?)(?:\r?\n|$)/.exec(body) ??
     /Exception:\s*(.+?)(?:\r?\n|$)/.exec(body);
-  return match?.[1]?.trim() ?? body.slice(0, 200).trim();
+  if (match?.[1] !== undefined) return { kind: 'query', cause: match[1].trim() };
+  if (body.trimStart().startsWith('<')) return { kind: 'page', title: htmlTitle(body) };
+  return { kind: 'query', cause: body.slice(0, ERROR_TEXT_LIMIT).trim() || `HTTP ${status}` };
 }
 
 /**
@@ -278,108 +420,123 @@ export function toCallerPosition(message: string, prepared: PreparedQuery): stri
   );
 }
 
+/** The `data.reason` an error carries, if any. */
+const reasonOf = (err: unknown): unknown =>
+  (err as { data?: { reason?: unknown } } | undefined)?.data?.reason;
+
 export class WikidataSparqlService {
   private readonly userAgent: string;
-  private readonly defaultTimeoutMs: number;
+  /**
+   * The longest any call waits: `WIKIDATA_SPARQL_TIMEOUT_MS`, held under the Query Service's 60 s
+   * limit so the timeout is ours.
+   */
+  private readonly maxTimeoutMs: number;
 
   constructor(_config: AppConfig, _storage: StorageService) {
     const serverCfg = getServerConfig();
     this.userAgent = serverCfg.userAgent;
-    this.defaultTimeoutMs = serverCfg.sparqlTimeoutMs;
+    this.maxTimeoutMs = Math.min(serverCfg.sparqlTimeoutMs, 55_000);
   }
 
   /**
    * Execute a SPARQL SELECT query against the Wikidata Query Service.
    * Injects common prefixes and label SERVICE when appropriate.
+   *
+   * `timeoutMs` (default and ceiling `WIKIDATA_SPARQL_TIMEOUT_MS`, at most 55 s) is one deadline for
+   * the whole call — every attempt, backoff, and throttle retry — and its expiry rejects with the
+   * `timeout` reason, unless the last attempt was throttled, which stays `throttled`. A 200 body
+   * carrying the Query Service's own timeout trailer is `timeout` too, never partial rows. Caller
+   * cancellation (`ctx.signal`) rejects with the abort itself.
+   *
+   * @throws `throttled` (429), `parse_error` (400/422 reporting the query), `timeout`,
+   *   `result_too_large` (a body past 8 MiB), or ServiceUnavailable for any other status, a proxy's
+   *   error page, or a body that is not a result document.
    */
-  query(
+  async query(
     rawQuery: string,
     language: string,
     timeoutMs: number | undefined,
     ctx: Context,
-  ): Promise<SparqlResponse> {
-    const effectiveTimeout = Math.min(timeoutMs ?? this.defaultTimeoutMs, 55_000);
+    { graph = 'main', maxRows }: SparqlQueryOptions = {},
+  ): Promise<SparqlQueryResult> {
+    const deadlineMs = Math.min(timeoutMs ?? this.maxTimeoutMs, this.maxTimeoutMs);
     const prepared = prepareQuery(rawQuery, language);
-    const query = prepared.text;
+    const endpoint = SPARQL_ENDPOINTS[graph];
 
-    ctx.log.debug('Executing SPARQL query', { language, timeoutMs: effectiveTimeout });
-    return withRetry(
-      async () => {
-        const timeoutController = new AbortController();
-        let timedOut = false;
-        const timeoutId = setTimeout(() => {
-          if (ctx.signal.aborted) return;
-          timedOut = true;
-          timeoutController.abort();
-        }, effectiveTimeout);
-        const signal = AbortSignal.any([ctx.signal, timeoutController.signal]);
-
-        try {
-          const response = await fetch(SPARQL_ENDPOINT, {
-            method: 'POST',
-            headers: {
-              'User-Agent': this.userAgent,
-              Accept: 'application/sparql-results+json',
-              'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: new URLSearchParams({ query }),
-            signal,
-          });
-
-          if (response.status === 429) {
-            const retryAfter = response.headers.get('Retry-After');
-            throw rateLimited(
-              `Wikidata SPARQL endpoint is rate-limited. ${retryAfter ? `Retry after ${retryAfter}s.` : 'Retry shortly.'}`,
-              { reason: 'throttled', ...(retryAfter ? { retryAfter } : {}) },
-            );
-          }
-
-          if (!response.ok) {
-            const body = await response.text().catch(() => '');
-            if (response.status === 400 || response.status === 422) {
-              const cause = toCallerPosition(extractSparqlError(body), prepared);
-              throw validationError(`SPARQL parse error: ${cause}`, {
-                reason: 'parse_error',
-                cause,
-              });
-            }
-            throw serviceUnavailable(`Wikidata SPARQL endpoint returned HTTP ${response.status}.`, {
-              status: response.status,
-            });
-          }
-
-          const text = await response.text();
-          if (isHtmlResponse(text)) {
-            throw serviceUnavailable(
-              'SPARQL endpoint returned HTML — likely rate-limited or under maintenance.',
-            );
-          }
-
-          return JSON.parse(text) as SparqlResponse;
-        } catch (err) {
-          if (timedOut && err instanceof Error && err.name === 'AbortError') {
-            throw timeout(
-              `SPARQL query timed out after ${effectiveTimeout / 1000}s. Add a LIMIT clause or simplify the query.`,
-              { reason: 'timeout' },
-            );
-          }
-          throw err;
-        } finally {
-          clearTimeout(timeoutId);
-        }
-      },
-      {
+    ctx.log.debug('Executing SPARQL query', { language, graph, timeoutMs: deadlineMs, maxRows });
+    try {
+      return await withRetry(({ signal }) => this.attempt(endpoint, prepared, maxRows, signal), {
         operation: 'WikidataSparql.query',
         context: ctx,
         baseDelayMs: 2000,
         signal: ctx.signal,
+        deadlineMs,
         // Only retry throttle errors (429), not parse errors or timeouts
-        isTransient: (err) => {
-          const e = err as { code?: number; data?: { reason?: string } };
-          return e?.data?.reason === 'throttled';
+        isTransient: (err) => reasonOf(err) === 'throttled',
+      });
+    } catch (err) {
+      if (reasonOf(err) !== 'retry_deadline_exceeded') throw err;
+      // A throttle the deadline cut short is still a throttle: the query never ran long.
+      const last = (err as Error).cause;
+      if (reasonOf(last) === 'throttled') throw last;
+      throw timeout(
+        `SPARQL query timed out after ${deadlineMs / 1000}s. Narrow the WHERE clause, add or lower the LIMIT, or simplify the query.`,
+        { reason: 'timeout' },
+        { cause: err },
+      );
+    }
+  }
+
+  /** One request. `signal` carries both the caller's cancellation and the call's deadline. */
+  private async attempt(
+    endpoint: string,
+    prepared: PreparedQuery,
+    maxRows: number | undefined,
+    signal: AbortSignal,
+  ): Promise<SparqlQueryResult> {
+    const response = await network(() =>
+      fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'User-Agent': this.userAgent,
+          Accept: 'application/sparql-results+json',
+          'Content-Type': 'application/x-www-form-urlencoded',
         },
-      },
+        body: new URLSearchParams({ query: prepared.text }),
+        signal,
+      }),
     );
+
+    if (response.status === 429) {
+      const retryAfter = response.headers.get('Retry-After');
+      throw rateLimited(
+        `Wikidata SPARQL endpoint is rate-limited. ${retryAfter ? `Retry after ${retryAfter}s.` : 'Retry shortly.'}`,
+        { reason: 'throttled', ...(retryAfter ? { retryAfter } : {}) },
+      );
+    }
+
+    if (!response.ok) {
+      const body = await network(() => response.text());
+      if (response.status === 400 || response.status === 422) {
+        const error = readErrorBody(body, response.status);
+        if (error.kind === 'page') {
+          throw serviceUnavailable(
+            `The Wikidata SPARQL endpoint answered HTTP ${response.status} with an error page${error.title ? ` ("${error.title}")` : ''}, not a report on the query. Retry shortly.`,
+            { status: response.status },
+          );
+        }
+        const cause = toCallerPosition(error.cause, prepared);
+        throw validationError(`SPARQL parse error: ${cause}`, {
+          reason: 'parse_error',
+          cause,
+        });
+      }
+      throw serviceUnavailable(`Wikidata SPARQL endpoint returned HTTP ${response.status}.`, {
+        status: response.status,
+      });
+    }
+
+    return readResults(response, maxRows);
   }
 }
 

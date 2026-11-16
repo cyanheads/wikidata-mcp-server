@@ -5,7 +5,7 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { serviceUnavailable, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { serviceUnavailable, timeout, validationError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createPacer, fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
@@ -46,6 +46,14 @@ const labelBatchQueue = createPacer({
 
 /** Most IDs one `wbgetentities` request accepts. */
 const LABEL_BATCH_SIZE = 50;
+
+/**
+ * One budget for a whole `fetchLabels` call — queue wait, every batch, every retry and backoff —
+ * so it settles under an MCP client's 60 s default request timeout. A 500-ID call is 10 batches
+ * in 3 rounds of {@link labelBatchQueue}, and each batch's retry ladder (four attempts of up to
+ * the REST timeout, plus backoff) alone can approach that timeout, so chained rounds outrun it.
+ */
+const LABELS_DEADLINE_MS = 50_000;
 
 /**
  * `_fields` values each entity endpoint accepts, verified against the live API.
@@ -90,15 +98,26 @@ export function isPId(id: string): boolean {
 }
 
 /**
- * Normalizes a Q/P-ID to uppercase, trimming surrounding whitespace (e.g. ` q76 ` → `Q76`).
+ * The entity forms `wikidata_sparql_query` returns an ID in: the concept URI
+ * (`http://www.wikidata.org/entity/Q42`, in structuredContent) and the `wd:` compact form (in
+ * content[]). Anchored, one fixed alternative each, so a match reads at most the first 32
+ * characters.
+ */
+const ENTITY_ID_PREFIX = /^(?:https?:\/\/www\.wikidata\.org\/entity\/|wd:)/i;
+
+/**
+ * Normalizes a Q/P-ID to its bare uppercase form, trimming surrounding whitespace and one
+ * leading entity URI or `wd:` prefix (` q76 ` → `Q76`, `wd:Q42` and
+ * `http://www.wikidata.org/entity/Q42` → `Q42`).
  *
- * Trimming here covers every ID-format call site: the tools and the entity resource all run
- * their `isQId`/`isPId` check on a `normalizeId()` result, so incidental whitespace no longer
- * reaches the strict `^[QqPp]\d+$` patterns as an "invalid ID". `isQId`/`isPId` need no trim
- * of their own — nothing calls them on a value that has not been through `normalizeId` first.
+ * Every ID-format call site inherits this: the tools and the entity resource all run their
+ * `isQId`/`isPId` check on a `normalizeId()` result, so incidental whitespace or a SPARQL result
+ * value no longer reaches the strict `^[QqPp]\d+$` patterns as an "invalid ID". `isQId`/`isPId`
+ * need no trim of their own — nothing calls them on a value that has not been through
+ * `normalizeId` first.
  */
 export function normalizeId(id: string): string {
-  return id.trim().toUpperCase();
+  return id.trim().replace(ENTITY_ID_PREFIX, '').toUpperCase();
 }
 
 /** The HTTP status `fetchWithTimeout` records on a non-2xx rejection. */
@@ -299,26 +318,27 @@ export class WikidataRestService {
       ? `entities/items/${normalized}/statements`
       : `entities/properties/${normalized}/statements`;
 
+    // Each entry reaches upstream as its bare P-ID, whatever form `normalizeId` accepted.
+    const props = properties?.map(normalizeId);
+
     // The REST API supports a single `property` filter param per request.
     // For multiple properties we fetch all and client-filter.
     const url =
-      properties?.length === 1
-        ? `${REST_BASE}/${basePath}?property=${properties[0]?.toUpperCase()}`
+      props?.length === 1
+        ? `${REST_BASE}/${basePath}?property=${props[0]}`
         : `${REST_BASE}/${basePath}`;
 
-    ctx.log.debug('Fetching statements', { id: normalized, properties });
+    ctx.log.debug('Fetching statements', { id: normalized, properties: props });
     const data = await this.getJson<Record<string, RawStatement[]>>(url, ctx);
 
-    if (properties && properties.length > 1) {
-      const upperProps = new Set(properties.map((p) => p.toUpperCase()));
-      return Object.fromEntries(
-        Object.entries(data).filter(([key]) => upperProps.has(key.toUpperCase())),
-      );
+    if (props && props.length > 1) {
+      const wanted = new Set(props);
+      return Object.fromEntries(Object.entries(data).filter(([key]) => wanted.has(key)));
     }
     return data;
   }
 
-  /** Fetch sitelinks for a Q-ID, optionally filtered to specific site codes. */
+  /** Fetch sitelinks for a Q-ID, optionally filtered to specific site codes (trimmed, any case). */
   async fetchSitelinks(
     id: string,
     sites: string[] | undefined,
@@ -332,7 +352,8 @@ export class WikidataRestService {
     >(url, ctx);
 
     if (sites?.length) {
-      const siteSet = new Set(sites);
+      // Every upstream site code is lowercase, so `ENWIKI` and ` enwiki ` mean enwiki.
+      const siteSet = new Set(sites.map((site) => site.trim().toLowerCase()));
       return Object.fromEntries(Object.entries(data).filter(([key]) => siteSet.has(key)));
     }
     return data;
@@ -389,7 +410,8 @@ export class WikidataRestService {
    * Batch-resolve labels and descriptions using the MediaWiki wbgetentities API (the REST API
    * has no batch label endpoint), {@link LABEL_BATCH_SIZE} IDs per request.
    *
-   * IDs absent from the result did not resolve; callers diff against what they requested.
+   * IDs absent from the result did not resolve; callers diff against what they requested. Entries
+   * come back in the order of `ids`.
    */
   async fetchLabels(
     ids: string[],
@@ -460,30 +482,63 @@ export class WikidataRestService {
      * so the cap counts batches in progress.
      *
      * The call's batches share one signal: the caller's, joined with `stop`, which the first
-     * batch to fail fires before its slot is released. Aborting it pulls this call's queued
-     * batches out of the queue unstarted and cuts its in-flight ones short, so a failed or
-     * cancelled call frees its slots for other callers at once; their batches carry their own
-     * signals and never see it.
+     * batch to fail fires before its slot is released, and with the call's
+     * {@link LABELS_DEADLINE_MS} clock. Aborting it pulls this call's queued batches out of the
+     * queue unstarted and cuts its in-flight ones short, so a failed, cancelled, or expired call
+     * frees its slots for other callers at once; their batches carry their own signals and
+     * never see it.
      */
     const stop = new AbortController();
-    const signal = AbortSignal.any([ctx.signal, stop.signal]);
-    await Promise.all(
-      batches.map((batch) =>
-        labelBatchQueue.run(
-          async (batchSignal) => {
-            try {
-              await resolveBatch(batch, batchSignal);
-            } catch (err) {
-              stop.abort(err);
-              throw err;
-            }
-          },
-          { signal },
+    const deadline = new AbortController();
+    const timer = setTimeout(
+      () =>
+        deadline.abort(
+          new DOMException(
+            `Label lookup exceeded its ${LABELS_DEADLINE_MS} ms deadline.`,
+            'TimeoutError',
+          ),
         ),
-      ),
+      LABELS_DEADLINE_MS,
     );
+    const signal = AbortSignal.any([ctx.signal, stop.signal, deadline.signal]);
+    try {
+      await Promise.all(
+        batches.map((batch) =>
+          labelBatchQueue.run(
+            async (batchSignal) => {
+              try {
+                await resolveBatch(batch, batchSignal);
+              } catch (err) {
+                stop.abort(err);
+                throw err;
+              }
+            },
+            { signal },
+          ),
+        ),
+      );
+    } catch (err) {
+      // The caller's own cancellation outranks the deadline and passes through untouched.
+      if (deadline.signal.aborted && !ctx.signal.aborted) {
+        throw timeout(
+          `The Wikidata label lookup for ${ids.length} IDs did not finish within ${LABELS_DEADLINE_MS / 1000} s. Retry, or send fewer IDs per call.`,
+          { deadlineMs: LABELS_DEADLINE_MS },
+          { cause: err },
+        );
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
 
-    return results;
+    // Batches settle in network order. Return the asked-for IDs in input order, then any entry the
+    // API keyed under another ID, such as a redirect's target, in arrival order.
+    const ordered: typeof results = {};
+    for (const id of ids.map(normalizeId)) {
+      const entry = results[id];
+      if (entry) ordered[id] = entry;
+    }
+    return Object.assign(ordered, results);
   }
 }
 
@@ -640,6 +695,24 @@ export function collectLabelQids(rawStatements: RawStatement[]): Set<string> {
     }
   }
   return qids;
+}
+
+/**
+ * The P-IDs a statement set needs labels for — the property of every snak (the statement's own,
+ * each qualifier's, each reference part's) and every property-typed value — deduplicated for the
+ * same `fetchLabels` batch as {@link collectLabelQids}. A `somevalue`/`novalue` snak still names
+ * its property but contributes no value.
+ */
+export function collectLabelPids(rawStatements: RawStatement[]): Set<string> {
+  const pids = new Set<string>();
+  for (const raw of rawStatements) {
+    for (const snak of statementSnaks(raw)) {
+      if (snak.property?.id) pids.add(snak.property.id);
+      const value = normalizeStatementValue(snak.property?.data_type, snak.value);
+      if (value.type === 'entity-id' && value.entityType === 'property') pids.add(value.id);
+    }
+  }
+  return pids;
 }
 
 /** Normalize one snak, attaching `label` / `unitLabel` when its Q-ID resolved in `labelMap`. */

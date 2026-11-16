@@ -43,6 +43,13 @@
           "default": "10000"
         },
         {
+          "name": "WIKIDATA_CLAMP_LIMITS",
+          "description": "Serve a count above its per-call cap at the cap, with a notice; false rejects it instead.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -115,6 +122,13 @@
           "format": "string",
           "isRequired": false,
           "default": "10000"
+        },
+        {
+          "name": "WIKIDATA_CLAMP_LIMITS",
+          "description": "Serve a count above its per-call cap at the cap, with a notice; false rejects it instead.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "true"
         },
         {
           "name": "MCP_LOG_LEVEL",
