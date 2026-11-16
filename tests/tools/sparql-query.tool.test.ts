@@ -546,7 +546,7 @@ describe('wikidataSparqlQuery', () => {
    * tell a partial result from a whole one).
    */
   describe('row ceiling (#51)', () => {
-    const query = 'SELECT ?item ?dob ?label WHERE { ?item wdt:P31 wd:Q5 } LIMIT 10000';
+    const query = 'SELECT ?item ?dob ?label WHERE { ?item wdt:P31 wd:Q515 } LIMIT 5000';
     const vars = ['item', 'dob', 'label'];
     const row = (i: number) => ({
       item: { type: 'uri', value: `http://www.wikidata.org/entity/Q${i}` },
