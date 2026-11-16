@@ -4,7 +4,7 @@ description: Use wikidata_* tools to identify entities, verify qualified claims,
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope

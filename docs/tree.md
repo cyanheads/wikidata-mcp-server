@@ -1,6 +1,6 @@
 # wikidata-mcp-server - Directory Structure
 
-Generated on: 2026-10-28 12:20:02
+Generated on: 2026-11-16 05:57:06
 
 ```text
 wikidata-mcp-server/
@@ -27,6 +27,7 @@ wikidata-mcp-server/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
+│   ├── 0.4.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -162,11 +163,14 @@ wikidata-mcp-server/
 │   │       │   ├── resolve-external-id.tool.ts
 │   │       │   ├── search-entities.tool.ts
 │   │       │   └── sparql-query.tool.ts
+│   │       ├── count-limit.ts
 │   │       ├── language-code.ts
 │   │       ├── statement-format.ts
+│   │       ├── upstream-unavailable.ts
 │   │       └── utf8-bytes.ts
 │   ├── services/
 │   │   └── wikidata/
+│   │       ├── sparql-results-scanner.ts
 │   │       ├── types.ts
 │   │       ├── wikidata-rest-service.ts
 │   │       └── wikidata-sparql-service.ts
@@ -186,6 +190,7 @@ wikidata-mcp-server/
 │   │   ├── wikidata-rest-service.test.ts
 │   │   └── wikidata-sparql-service.test.ts
 │   └── tools/
+│       ├── count-limit.test.ts
 │       ├── get-entity.tool.test.ts
 │       ├── get-labels.tool.test.ts
 │       ├── get-sitelinks.tool.test.ts
