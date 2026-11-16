@@ -225,6 +225,7 @@ src/
     tools/count-limit.ts                 # Per-call caps: clamp with a notice, or reject (WIKIDATA_CLAMP_LIMITS)
     tools/language-code.ts               # Shared language/languages input schemas
     tools/statement-format.ts            # Shared markdown rendering of normalized statements
+    tools/upstream-unavailable.ts        # Whether a failed upstream request is one a tool degrades past
     tools/utf8-bytes.ts                  # UTF-8 byte length, the unit of every response budget
     resources/definitions/
       entity.resource.ts                 # Compact entity resource
