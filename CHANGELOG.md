@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-11-15 · ⚠️ Breaking · 🛡️ Security
 
-Bound wikidata_sparql_query results at 4,000 rows, find scholarly articles by DOI and PMID again, and page statements per property with a best-rank filter and labelled P-IDs.
+Bound wikidata_sparql_query results at 4,000 rows, find scholarly articles by DOI and PMID, and page statements per property with a best-rank filter and labelled P-IDs.
 
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-10-28
 
