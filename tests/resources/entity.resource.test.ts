@@ -64,6 +64,18 @@ describe('wikidataEntityResource', () => {
     vi.clearAllMocks();
   });
 
+  it('#60 identifies the canonical entity when the resource ID redirects', async () => {
+    mockFetchEntity.mockResolvedValue({ id: 'Q296', type: 'item', labels: { en: 'Claude Monet' } });
+    const uri = new URL('wikidata://entity/Q20793034');
+    const result = String(
+      await wikidataEntityResource.handler({ id: 'Q20793034' }, createMockContext({ uri })),
+    );
+
+    expect(result).toContain('# Claude Monet (Q296)');
+    expect(result).toContain('**Redirected from:** Q20793034');
+    expect(result).toContain('https://www.wikidata.org/wiki/Q296');
+  });
+
   it('preserves upstream Markdown characters in labels, descriptions and links', async () => {
     const text = 'A*p* `code` <b>tag</b> &copy; [link](javascript:alert)';
     mockFetchEntity.mockResolvedValue({

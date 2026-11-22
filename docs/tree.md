@@ -1,6 +1,6 @@
 # wikidata-mcp-server - Directory Structure
 
-Generated on: 2026-11-16 05:57:06
+Generated on: 2026-11-22 01:06:29
 
 ```text
 wikidata-mcp-server/
@@ -200,7 +200,8 @@ wikidata-mcp-server/
 │       ├── resolve-external-id.tool.test.ts
 │       ├── search-entities.tool.test.ts
 │       ├── sparql-query.tool.test.ts
-│       └── tool-annotations.test.ts
+│       ├── tool-annotations.test.ts
+│       └── upstream-response-contracts.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes

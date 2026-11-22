@@ -20,10 +20,14 @@ const WIKIPEDIA_HOST = /^[a-z0-9-]+\.wikipedia\.org$/;
  * True when a sitelink is a Wikipedia edition: the host of its own URL is
  * `<edition>.wikipedia.org`. The site code cannot tell — ten non-Wikipedia codes end in "wiki"
  * (commonswiki, specieswiki, wikidatawiki, …), and underscore codes name hyphenated hosts
- * (be_x_oldwiki is be-tarask.wikipedia.org). An entry without a URL does not count as one.
+ * (be_x_oldwiki is be-tarask.wikipedia.org). Abstract Wikipedia uses a site under the same
+ * domain for language-independent content.
  */
-const isWikipediaEdition = (sitelink: { url?: string | null | undefined }): boolean =>
-  WIKIPEDIA_HOST.test(URL.parse(sitelink.url ?? '')?.hostname ?? '');
+const isWikipediaEdition = ([code, sitelink]: [
+  string,
+  { url?: string | null | undefined },
+]): boolean =>
+  code !== 'abstractwiki' && WIKIPEDIA_HOST.test(URL.parse(sitelink.url ?? '')?.hostname ?? '');
 
 export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
   title: 'Get Wikidata Sitelinks',
@@ -48,12 +52,16 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
       .boolean()
       .default(false)
       .describe(
-        'When true, return only Wikipedia editions: sitelinks whose URL is on a <subdomain>.wikipedia.org host, such as enwiki (en.wikipedia.org) or be_x_oldwiki (be-tarask.wikipedia.org). Excludes Wikimedia Commons, Wikispecies, Wikisource, Wiktionary, Wikiquote, and every other project.',
+        'When true, return only Wikipedia language editions: sitelinks whose URL is on a <subdomain>.wikipedia.org host, such as enwiki (en.wikipedia.org) or be_x_oldwiki (be-tarask.wikipedia.org). Excludes Abstract Wikipedia, Wikimedia Commons, Wikispecies, Wikisource, Wiktionary, Wikiquote, and every other project.',
       ),
   }),
 
   output: z.object({
-    id: z.string().describe('The Q-ID whose sitelinks were fetched.'),
+    id: z.string().describe('The resolved Q-ID whose sitelinks were fetched.'),
+    redirectedFrom: z
+      .string()
+      .optional()
+      .describe('The normalized requested Q-ID when it redirects to id.'),
     sitelinks: z
       .record(
         z.string(),
@@ -70,12 +78,16 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
         'Map of site code to sitelink metadata. Empty when the entity has no matching sitelinks.',
       ),
     count: z.number().describe('Number of sitelinks returned.'),
+    notFound: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Requested site codes absent from the resolved item, normalized to lowercase with surrounding whitespace removed.',
+      ),
     message: z
       .string()
       .optional()
-      .describe(
-        'Informational note when no sitelinks were found. Absent when sitelinks are present.',
-      ),
+      .describe('Informational note when a requested site code is absent or no sitelinks match.'),
   }),
 
   errors: [
@@ -106,22 +118,22 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
     const svc = getWikidataRestService();
     ctx.log.info('Fetching sitelinks', { id, sites: input.sites, wikis_only: input.wikis_only });
 
-    let rawSitelinks: Record<string, { title: string; url?: string | null; badges?: string[] }>;
+    let result: Awaited<ReturnType<typeof svc.fetchSitelinks>>;
     try {
-      rawSitelinks = await svc.fetchSitelinks(id, input.sites, ctx);
+      result = await svc.fetchSitelinks(id, input.sites, ctx);
     } catch (err) {
       if (isEntityNotFoundError(err)) {
         throw ctx.fail('entity_not_found', `No item found for Q-ID "${id}".`);
       }
       throw err;
     }
+    const { id: resolvedId, sitelinks: rawSitelinks, notFound } = result;
 
-    const sitelinks = input.wikis_only
-      ? Object.fromEntries(Object.entries(rawSitelinks).filter(([, sl]) => isWikipediaEdition(sl)))
-      : rawSitelinks;
+    const entries = Object.entries(rawSitelinks);
+    const sitelinks = input.wikis_only ? entries.filter(isWikipediaEdition) : entries;
 
     const normalized = Object.fromEntries(
-      Object.entries(sitelinks).map(([code, sl]) => [
+      sitelinks.map(([code, sl]) => [
         code,
         {
           title: sl.title,
@@ -131,29 +143,53 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
       ]),
     );
 
-    const count = Object.keys(normalized).length;
+    const count = sitelinks.length;
 
+    const messages: string[] = [];
+    if (notFound.length > 0) {
+      messages.push(
+        entries.length === 0
+          ? `None of the requested site codes (${notFound.join(', ')}) were found on ${resolvedId}.`
+          : `${resolvedId} has no sitelinks for ${notFound.join(', ')}.`,
+      );
+    }
     if (count === 0) {
-      // With sites set, a requested code present upstream was dropped only by wikis_only.
-      const present = Object.keys(rawSitelinks);
-      const hint = !input.sites?.length
-        ? input.wikis_only
-          ? `${id} has no Wikipedia (wikis_only) sitelinks.`
-          : `${id} has no sitelinks.`
-        : present.length === 0
-          ? `None of the requested site codes (${input.sites.join(', ')}) were found on ${id}.`
-          : present.length === 1
-            ? `The requested sitelink ${present[0]} on ${id} is not a Wikipedia edition; wikis_only returns Wikipedia editions only.`
-            : `The requested sitelinks ${present.join(', ')} on ${id} are not Wikipedia editions; wikis_only returns Wikipedia editions only.`;
-      return { id, sitelinks: {}, count: 0, message: hint };
+      if (!input.sites?.length) {
+        messages.push(
+          input.wikis_only
+            ? `${resolvedId} has no Wikipedia (wikis_only) sitelinks.`
+            : `${resolvedId} has no sitelinks.`,
+        );
+      } else {
+        // Selected site codes present upstream can only have been dropped by wikis_only.
+        const present = entries.map(([code]) => code);
+        if (present.length > 0) {
+          messages.push(
+            present.length === 1
+              ? `The requested sitelink ${present[0]} on ${resolvedId} is not a Wikipedia edition; wikis_only returns Wikipedia editions only.`
+              : `The requested sitelinks ${present.join(', ')} on ${resolvedId} are not Wikipedia editions; wikis_only returns Wikipedia editions only.`,
+          );
+        }
+      }
     }
 
-    return { id, sitelinks: normalized, count };
+    return {
+      id: resolvedId,
+      ...(resolvedId !== id ? { redirectedFrom: id } : {}),
+      sitelinks: normalized,
+      count,
+      ...(notFound.length > 0 ? { notFound } : {}),
+      ...(messages.length > 0 ? { message: messages.join(' ') } : {}),
+    };
   },
 
   format: (result) => {
     const lines: string[] = [`## Sitelinks for ${result.id}`, `**Count:** ${result.count}`];
 
+    if (result.redirectedFrom) lines.push(`**Redirected from:** ${result.redirectedFrom}`);
+    if (result.notFound?.length) {
+      lines.push(`**Not found:** ${result.notFound.map(escapeMarkdownInline).join(', ')}`);
+    }
     if (result.message) {
       lines.push(`\n> ${escapeMarkdownInline(result.message)}`);
     }
@@ -161,8 +197,8 @@ export const wikidataGetSitelinks = tool('wikidata_get_sitelinks', {
     // Wikipedia editions first, then every other project, each group in upstream order.
     const entries = Object.entries(result.sitelinks);
     const sorted = [
-      ...entries.filter(([, sl]) => isWikipediaEdition(sl)),
-      ...entries.filter(([, sl]) => !isWikipediaEdition(sl)),
+      ...entries.filter(isWikipediaEdition),
+      ...entries.filter((entry) => !isWikipediaEdition(entry)),
     ];
 
     for (const [code, sl] of sorted) {

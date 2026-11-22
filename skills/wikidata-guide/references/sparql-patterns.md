@@ -14,7 +14,7 @@ ORDER BY ?occupation
 LIMIT 20
 ```
 
-The server injects standard prefixes and a label service when label, description, or alias variables request it. Names such as `?occupationLabel` correspond to `?occupation`. Other prefixes, such as `xsd:`, need explicit declarations when used.
+The server injects `wd:`, `wdt:`, `p:`, `ps:`, `pq:`, `wikibase:`, `bd:`, `rdfs:`, and `schema:` unless the query declares them. The Query Service predeclares prefixes such as `xsd:`, `mwapi:`, and `wdsubgraph:`. Declare prefixes absent from both sets. The server also injects a label service when label, description, or alias variables request it and the query has no label service of its own. Names such as `?occupationLabel` correspond to `?occupation`.
 
 ## Statement nodes and qualifiers
 
@@ -47,6 +47,29 @@ LIMIT 20
 ```
 
 Replace the seed VALUES with a selective task-specific relationship when expanding beyond known items.
+
+## Search a name within a class
+
+Use `wikibase:mwapi` with `EntitySearch` to find name candidates, then filter them by known claims. This example uses direct, best-rank claims for human (`P31` → `Q5`) and United Kingdom citizenship (`P27` → `Q145`).
+
+```sparql
+SELECT ?item ?itemLabel ?itemDescription WHERE {
+  SERVICE wikibase:mwapi {
+    bd:serviceParam wikibase:endpoint "www.wikidata.org";
+                    wikibase:api "EntitySearch";
+                    mwapi:search "John Smith";
+                    mwapi:language "en";
+                    wikibase:limit 50 .
+    ?item wikibase:apiOutputItem mwapi:item .
+    ?searchRank wikibase:apiOrdinal true .
+  }
+  ?item wdt:P31 wd:Q5 ; wdt:P27 wd:Q145 .
+}
+ORDER BY ?searchRank ?item
+LIMIT 20
+```
+
+`wikibase:limit` caps the candidates fetched before filtering, and the outer `LIMIT` caps the rows returned afterward. Use the descriptions and relevant statements to verify identity. Candidates outside the search bound may also meet the filters.
 
 ## Scholarly articles
 

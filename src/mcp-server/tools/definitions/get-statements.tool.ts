@@ -45,7 +45,7 @@ const LIMIT_CAP = 500;
 function retrievalNotice(
   totalBytes: number,
   sections: SectionMeta[],
-  window: { limit: number; offset: number; rank: string },
+  window: { limit: number; offset: number; rank: string; resolvedId?: string },
 ): string {
   const budget = DEFAULT_OUTLINE_BUDGET_BYTES;
   const chosen: string[] = [];
@@ -56,7 +56,8 @@ function retrievalNotice(
       sum += section.bytes;
     }
   }
-  const sameCall = `the same id, limit: ${window.limit}, offset: ${window.offset}, and rank: "${window.rank}"`;
+  const id = window.resolvedId ? `id: "${window.resolvedId}"` : 'the same id';
+  const sameCall = `${id}, limit: ${window.limit}, offset: ${window.offset}, and rank: "${window.rank}"`;
   const parts = [
     `Statement set too large to inline: ${totalBytes} bytes against a ${budget}-byte budget.`,
   ];
@@ -135,7 +136,11 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
   }),
 
   output: z.object({
-    id: z.string().describe('The entity ID whose statements were fetched.'),
+    id: z.string().describe('The resolved entity ID whose statements were fetched.'),
+    redirectedFrom: z
+      .string()
+      .optional()
+      .describe('The normalized requested ID when it redirects to id.'),
     kind: z
       .enum(['full', 'outline'])
       .describe(
@@ -184,7 +189,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
     propertyTotals: z
       .record(z.string(), z.number())
       .describe(
-        'Statements each property in the selection holds after the rank filter and before the window, keyed by P-ID — 0 for a property whose statements are all deprecated under rank "best". Lists a property paged past its end too. Reported in both modes.',
+        'Statements each property in the selection holds after the rank filter and before the window, keyed by P-ID. Explicitly requested absent properties and properties emptied by rank "best" count as 0. Lists a property paged past its end too. Reported in both modes.',
       ),
     returnedCount: z
       .number()
@@ -201,7 +206,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
     labelsResolved: z
       .boolean()
       .describe(
-        'True when the returned statements had labels resolved: resolve_labels was true and kind is full, so every item QID and quantity unit that resolved carries its label, and propertyLabels holds every P-ID that resolved. False when resolve_labels was false, on an outline, which carries no statements and makes no label lookup, and when the label service did not answer, which the notice says.',
+        'True when label resolution was enabled and completed for a full response. Statements carry available item and unit labels, and propertyLabels holds available property labels. False when resolution was disabled, the response is an outline, or the label service was unavailable or rejected the language.',
       ),
     propertyLabels: z
       .record(z.string(), z.string())
@@ -226,7 +231,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
       .string()
       .optional()
       .describe(
-        'Present when limit was above the per-call cap of 500 (the requested and applied values), when offset is past the end of every property (the largest total), when rank "best" kept no statement of a property because all of them are deprecated (those properties and how to read them), or when the label service did not answer, so the statements came back unlabelled.',
+        'Explains missing requested properties, a clamped limit, an offset past every property, deprecated-only claims excluded by best rank, or labels unavailable because of an outage or an unrecognized language.',
       ),
   },
   enrichmentTrailer: {
@@ -305,15 +310,16 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
       offset,
     });
 
-    let rawStatements: Awaited<ReturnType<typeof svc.fetchStatements>>;
+    let result: Awaited<ReturnType<typeof svc.fetchStatements>>;
     try {
-      rawStatements = await svc.fetchStatements(id, input.properties, ctx);
+      result = await svc.fetchStatements(id, input.properties, ctx);
     } catch (err) {
       if (isEntityNotFoundError(err)) {
         throw ctx.fail('entity_not_found', `No entity found for ID "${id}".`);
       }
       throw err;
     }
+    const { id: resolvedId, statements: rawStatements } = result;
 
     /**
      * The rank filter runs first, so the totals, the window, the outline decision, and the label
@@ -357,12 +363,21 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
         `offset ${offset} is past the end of every property here: the largest, ${largest}, holds ${max} statements.${max > 0 ? ` Page with an offset below ${max}.` : ''}`,
       );
     }
-    const deprecatedOnly = totals.filter(([, n]) => n === 0).map(([p]) => p);
+    const deprecatedOnly = totals
+      .filter(([propertyId, total]) => total === 0 && (rawStatements[propertyId]?.length ?? 0) > 0)
+      .map(([propertyId]) => propertyId);
     if (input.rank === 'best' && deprecatedOnly.length > 0) {
       const holds = deprecatedOnly.length === 1 ? 'holds' : 'hold';
       notices.push(
         `${deprecatedOnly.join(', ')} ${holds} only deprecated statements, which rank "best" leaves out. Re-call with rank: "all" to read them.`,
       );
+    }
+    const missing = [...new Set(input.properties?.map(normalizeId))].filter(
+      (propertyId) => !rawStatements[propertyId]?.length,
+    );
+    if (missing.length > 0) {
+      for (const propertyId of missing) propertyTotals[propertyId] = 0;
+      notices.push(`${resolvedId} has no statements for ${missing.join(', ')}.`);
     }
 
     const normalizeAll = (labelMap: Record<string, string>) =>
@@ -431,8 +446,17 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
             });
             return;
           });
-        if (labelData) {
-          const labelOf = (entityId: string) => labelData[entityId]?.labels[input.language];
+        if (!labelData || labelData.unrecognizedLanguages.includes(input.language)) {
+          labelsResolved = false;
+          propertyLabels = undefined;
+          notices.push(
+            labelData
+              ? `Wikidata did not recognize "${input.language}" for labels. Use a term-language code such as en or fr, or set resolve_labels: false to keep the raw IDs.`
+              : 'Labels were not resolved: the Wikidata label service did not answer, so item values and P-IDs come back as raw IDs. Re-call for labels, or pass resolve_labels: false to skip them.',
+          );
+        } else {
+          const labelOf = (entityId: string) =>
+            labelData.entities[entityId]?.labels[input.language];
           const labelMap: Record<string, string> = {};
           for (const qid of qids) {
             const label = labelOf(qid);
@@ -443,12 +467,6 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
             if (label) propertyLabels[pid] = label;
           }
           if (qids.size > 0) normalized = normalizeAll(labelMap);
-        } else {
-          labelsResolved = false;
-          propertyLabels = undefined;
-          notices.push(
-            'Labels were not resolved: the Wikidata label service did not answer, so item values and P-IDs come back as raw IDs. Re-call for labels, or pass resolve_labels: false to skip them.',
-          );
         }
       }
     }
@@ -457,7 +475,8 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
 
     /** Cheap metadata — kept in both arms. */
     const base = {
-      id,
+      id: resolvedId,
+      ...(resolvedId !== id ? { redirectedFrom: id } : {}),
       propertyCount: Object.keys(normalized).length,
       statementCount,
       propertyTotals,
@@ -480,6 +499,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
           limit: limit.applied,
           offset,
           rank: input.rank,
+          ...(resolvedId !== id ? { resolvedId } : {}),
         }),
       } as never;
     }
@@ -505,6 +525,7 @@ export const wikidataGetStatements = tool('wikidata_get_statements', {
       `## Statements for ${result.id}`,
       `**Properties:** ${result.propertyCount} | **Total statements:** ${result.statementCount} | **Returned:** ${result.returnedCount} | **Rank:** ${result.rank} | **Labels resolved:** ${result.labelsResolved} | **Response:** ${result.kind}`,
     ];
+    if (result.redirectedFrom) lines.push(`**Redirected from:** ${result.redirectedFrom}`);
     const totals = Object.entries(result.propertyTotals);
     if (totals.length > 0) {
       lines.push(`**Property totals:** ${totals.map(([p, n]) => `${p}: ${n}`).join(', ')}`);

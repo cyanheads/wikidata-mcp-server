@@ -14,6 +14,7 @@ import type {
   NormalizedStatement,
   RawEntity,
   RawSearchResult,
+  RawSitelink,
   RawSnak,
   RawStatement,
   RawStatementValue,
@@ -209,7 +210,7 @@ export class WikidataRestService {
    * GETs JSON from the REST API. `fetchWithTimeout` rejects every non-2xx itself — with the
    * status on `data.status` — so a returned response is always 2xx and needs no status check.
    */
-  private getJson<T>(url: string, ctx: Context): Promise<T> {
+  private getJsonResponse<T>(url: string, ctx: Context): Promise<{ data: T; url: string }> {
     return withRetry(
       async () => {
         const response = await fetchWithTimeout(url, this.restTimeoutMs, ctx, {
@@ -222,10 +223,41 @@ export class WikidataRestService {
             'Wikidata REST returned HTML — likely rate-limited or under maintenance.',
           );
         }
-        return JSON.parse(text) as T;
+        return { data: JSON.parse(text) as T, url: response.url };
       },
       { operation: 'WikidataRest.getJson', context: ctx, baseDelayMs: 1000, signal: ctx.signal },
     );
+  }
+
+  private async getJson<T>(url: string, ctx: Context): Promise<T> {
+    return (await this.getJsonResponse<T>(url, ctx)).data;
+  }
+
+  /** Collection bodies omit the ID, including when the resolved collection is empty. */
+  private collectionEntityId(requestUrl: string, responseUrl: string, id: string): string {
+    if (!responseUrl || responseUrl === requestUrl) return id;
+    const requested = new URL(requestUrl);
+    const resolved = URL.parse(responseUrl);
+    if (
+      !resolved ||
+      resolved.origin !== requested.origin ||
+      resolved.pathname === requested.pathname
+    ) {
+      return id;
+    }
+    const requestPath = requested.pathname.split('/');
+    const resolvedPath = resolved.pathname.split('/');
+    const idIndex = requestPath.length - 2;
+    const resolvedId = resolvedPath[idIndex];
+    if (
+      resolvedId &&
+      (isQId(id) ? isQId(resolvedId) : isPId(resolvedId)) &&
+      requestPath.length === resolvedPath.length &&
+      requestPath.every((segment, index) => index === idIndex || segment === resolvedPath[index])
+    ) {
+      return resolvedId;
+    }
+    return id;
   }
 
   /** Search items or properties by text. */
@@ -312,7 +344,7 @@ export class WikidataRestService {
     id: string,
     properties: string[] | undefined,
     ctx: Context,
-  ): Promise<Record<string, RawStatement[]>> {
+  ): Promise<{ id: string; statements: Record<string, RawStatement[]> }> {
     const normalized = normalizeId(id);
     const basePath = isQId(normalized)
       ? `entities/items/${normalized}/statements`
@@ -329,13 +361,17 @@ export class WikidataRestService {
         : `${REST_BASE}/${basePath}`;
 
     ctx.log.debug('Fetching statements', { id: normalized, properties: props });
-    const data = await this.getJson<Record<string, RawStatement[]>>(url, ctx);
+    const response = await this.getJsonResponse<Record<string, RawStatement[]>>(url, ctx);
+    const resolvedId = this.collectionEntityId(url, response.url, normalized);
 
-    if (props && props.length > 1) {
+    if (props?.length) {
       const wanted = new Set(props);
-      return Object.fromEntries(Object.entries(data).filter(([key]) => wanted.has(key)));
+      const statements = Object.fromEntries(
+        Object.entries(response.data).filter(([key]) => wanted.has(key)),
+      );
+      return { id: resolvedId, statements };
     }
-    return data;
+    return { id: resolvedId, statements: response.data };
   }
 
   /** Fetch sitelinks for a Q-ID, optionally filtered to specific site codes (trimmed, any case). */
@@ -343,20 +379,23 @@ export class WikidataRestService {
     id: string,
     sites: string[] | undefined,
     ctx: Context,
-  ): Promise<Record<string, { title: string; url?: string | null; badges?: string[] }>> {
+  ): Promise<{ id: string; sitelinks: Record<string, RawSitelink>; notFound: string[] }> {
     const normalized = normalizeId(id);
     const url = `${REST_BASE}/entities/items/${normalized}/sitelinks`;
     ctx.log.debug('Fetching sitelinks', { id: normalized, sites });
-    const data = await this.getJson<
-      Record<string, { title: string; url?: string | null; badges?: string[] }>
-    >(url, ctx);
+    const response = await this.getJsonResponse<Record<string, RawSitelink>>(url, ctx);
+    const resolvedId = this.collectionEntityId(url, response.url, normalized);
 
     if (sites?.length) {
       // Every upstream site code is lowercase, so `ENWIKI` and ` enwiki ` mean enwiki.
       const siteSet = new Set(sites.map((site) => site.trim().toLowerCase()));
-      return Object.fromEntries(Object.entries(data).filter(([key]) => siteSet.has(key)));
+      const sitelinks = Object.fromEntries(
+        Object.entries(response.data).filter(([key]) => siteSet.has(key)),
+      );
+      const notFound = [...siteSet].filter((site) => !Object.hasOwn(sitelinks, site));
+      return { id: resolvedId, sitelinks, notFound };
     }
-    return data;
+    return { id: resolvedId, sitelinks: response.data, notFound: [] };
   }
 
   /**
@@ -367,7 +406,7 @@ export class WikidataRestService {
    * the extraction below is unaffected.
    *
    * `fetchWithTimeout` rejects every non-2xx itself, so a returned response is always 2xx.
-   * A rejected batch still arrives as HTTP 200 carrying a top-level `error` — see fetchLabels.
+   * A rejected batch still arrives as HTTP 200 carrying `errors` — see fetchLabels.
    */
   private fetchWbEntities(
     ids: string[],
@@ -383,6 +422,7 @@ export class WikidataRestService {
       languagefallback: '1',
       format: 'json',
       formatversion: '2',
+      errorformat: 'plaintext',
     });
     const url = `${MW_API_BASE}?${params}`;
     return withRetry(
@@ -410,16 +450,10 @@ export class WikidataRestService {
    * Batch-resolve labels and descriptions using the MediaWiki wbgetentities API (the REST API
    * has no batch label endpoint), {@link LABEL_BATCH_SIZE} IDs per request.
    *
-   * IDs absent from the result did not resolve; callers diff against what they requested. Entries
-   * come back in the order of `ids`.
+   * IDs absent from the entity map did not resolve. Entities and rejected languages come back in
+   * input order.
    */
-  async fetchLabels(
-    ids: string[],
-    languages: string[],
-    ctx: Context,
-  ): Promise<
-    Record<string, { labels: Record<string, string>; descriptions: Record<string, string> }>
-  > {
+  async fetchLabels(ids: string[], languages: string[], ctx: Context) {
     const batches: string[][] = [];
     for (let i = 0; i < ids.length; i += LABEL_BATCH_SIZE) {
       batches.push(ids.slice(i, i + LABEL_BATCH_SIZE));
@@ -429,6 +463,18 @@ export class WikidataRestService {
       string,
       { labels: Record<string, string>; descriptions: Record<string, string> }
     > = {};
+    const requested = new Set(languages);
+    const unrecognized = new Set<string>();
+
+    // With no recognized language, MediaWiki returns unfiltered terms. Its fallback
+    // results are keyed by the requested language, so filtering keeps those intact.
+    const selectTerms = (terms: Record<string, { value: string }> | undefined) => {
+      const selected: Record<string, string> = Object.create(null);
+      for (const [lang, term] of Object.entries(terms ?? {})) {
+        if (requested.has(lang) && !unrecognized.has(lang)) selected[lang] = term.value;
+      }
+      return selected;
+    };
 
     const resolveBatch = async (batch: string[], signal: AbortSignal) => {
       let remaining = batch.map(normalizeId);
@@ -446,9 +492,19 @@ export class WikidataRestService {
       while (remaining.length > 0) {
         const data = await this.fetchWbEntities(remaining, languages, ctx, signal);
 
-        if (data.error) {
-          const badId = data.error.id;
-          if (data.error.code === 'no-such-entity' && badId && remaining.includes(badId)) {
+        // The other enum-list parameter, props, is fixed. Match machine-readable values
+        // against the requested languages rather than parsing the localized warning text.
+        for (const warning of data.warnings ?? []) {
+          if (warning.module !== 'wbgetentities' || warning.code !== 'unrecognizedvalues') continue;
+          for (const value of warning.data?.values ?? []) {
+            if (requested.has(value)) unrecognized.add(value);
+          }
+        }
+
+        const error = data.errors?.[0];
+        if (error) {
+          const badId = error.data?.id;
+          if (error.code === 'no-such-entity' && badId && remaining.includes(badId)) {
             ctx.log.debug('Dropping unresolvable ID from labels batch', { id: badId });
             remaining = remaining.filter((id) => id !== badId);
             continue;
@@ -456,20 +512,16 @@ export class WikidataRestService {
           // Any other top-level error is a real failure — surface it rather than let the
           // batch collapse into a silent "none of these IDs exist".
           throw serviceUnavailable(
-            `Wikidata MW API rejected the labels request: ${data.error.info} (${data.error.code})`,
-            { apiErrorCode: data.error.code, retryable: false },
+            `Wikidata MW API rejected the labels request: ${error.text} (${error.code})`,
+            { apiErrorCode: error.code, retryable: false },
           );
         }
 
         for (const [id, entity] of Object.entries(data.entities ?? {})) {
           if (entity.missing === '') continue;
           results[id] = {
-            labels: Object.fromEntries(
-              Object.entries(entity.labels ?? {}).map(([lang, lb]) => [lang, lb.value]),
-            ),
-            descriptions: Object.fromEntries(
-              Object.entries(entity.descriptions ?? {}).map(([lang, ds]) => [lang, ds.value]),
-            ),
+            labels: selectTerms(entity.labels),
+            descriptions: selectTerms(entity.descriptions),
           };
         }
         return;
@@ -538,7 +590,10 @@ export class WikidataRestService {
       const entry = results[id];
       if (entry) ordered[id] = entry;
     }
-    return Object.assign(ordered, results);
+    return {
+      entities: Object.assign(ordered, results),
+      unrecognizedLanguages: [...requested].filter((language) => unrecognized.has(language)),
+    };
   }
 }
 
@@ -588,9 +643,19 @@ export function normalizeStatementValue(
   }
 
   if (effective === 'time') {
-    const content = rawContent as { time?: string; precision?: number } | null;
+    const content = rawContent as {
+      time?: string;
+      precision?: number;
+      calendarmodel?: string;
+    } | null;
     if (typeof content === 'object' && content !== null) {
-      return { type: 'time', time: content.time ?? '', precision: content.precision ?? 0 };
+      const calendar = modelQid(content.calendarmodel);
+      return {
+        type: 'time',
+        time: content.time ?? '',
+        precision: content.precision ?? 0,
+        ...(calendar && { calendarmodel: calendar }),
+      };
     }
     return { type: 'other', raw: rawContent };
   }
@@ -632,13 +697,16 @@ export function normalizeStatementValue(
       latitude?: number;
       longitude?: number;
       precision?: number;
+      globe?: string;
     } | null;
     if (typeof content === 'object' && content !== null) {
+      const globe = modelQid(content.globe);
       return {
         type: 'globe-coordinate',
         latitude: content.latitude ?? 0,
         longitude: content.longitude ?? 0,
         ...(content.precision != null ? { precision: content.precision } : {}),
+        ...(globe && { globe }),
       };
     }
     return { type: 'other', raw: rawContent };
@@ -666,6 +734,12 @@ export function normalizeStatementValue(
  */
 export function unitQid(unit: string | undefined): string | undefined {
   return unit?.match(/^https?:\/\/www\.wikidata\.org\/entity\/(Q\d+)$/)?.[1];
+}
+
+/** A calendar or globe can arrive as a concept URI or a bare item ID. */
+function modelQid(value: string | undefined): string | undefined {
+  if (typeof value !== 'string') return;
+  return isQId(value) ? value.toUpperCase() : unitQid(value);
 }
 
 /** Every snak a statement carries: its main value, its qualifiers, and each reference's parts. */

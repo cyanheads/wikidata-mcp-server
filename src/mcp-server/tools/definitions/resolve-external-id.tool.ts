@@ -34,7 +34,16 @@ const RESOLVER_PREFIXES: Record<string, RegExp> = {
   P10283: /^(?:https?:\/\/)?(?:api\.)?openalex\.org\/(?:[a-z]+\/)?/i,
   /** IMDb's page path for each kind of ID; whatever follows the ID in a URL is page path too. */
   P345: /^(?:https?:\/\/)?(?:www\.|m\.)?imdb\.com\/(?:title|name|company|event)\//i,
+  P932: /^pmc/i,
+  P6782: /^(?:https?:\/\/)?ror\.org\//i,
+  P818: /^(?:arxiv:|(?:https?:\/\/)?arxiv\.org\/abs\/)/i,
 };
+
+/** Modern and legacy arXiv identifiers, including a version when given. */
+const ARXIV_ID = /^(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?\/\d{7})(?:v\d+)?$/;
+
+/** An ISNI displayed as four groups of four characters. */
+const GROUPED_ISNI = /^(?:\d{4} ){3}\d{3}[\dX]$/;
 
 /**
  * An IMDb ID as P345 stores it, read case-insensitively: a two-letter prefix and digits, or one of
@@ -113,6 +122,14 @@ export function normalizeExternalId(property: string, value: string): string[] {
     case 'P345':
       // A value that holds no IMDb ID — a URL to another page included — is sent as given.
       return imdbIdForms(bare, bare !== given) ?? [given];
+    case 'P932':
+      return [bare !== given && /^[1-9]\d+$/.test(bare) ? bare : given];
+    case 'P6782':
+      return [bare !== given && /^[a-z0-9]{9}$/.test(bare) ? bare : given];
+    case 'P213':
+      return [GROUPED_ISNI.test(given) ? given.replaceAll(' ', '') : given];
+    case 'P818':
+      return [bare !== given && ARXIV_ID.test(bare) ? bare : given];
     default:
       return [given];
   }
@@ -224,7 +241,7 @@ const claimantLine = (entry: { id: string; label: string; rank: StatementRank })
 export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
   title: 'Resolve Wikidata External ID',
   description:
-    'Look up a Wikidata entity by an external identifier such as a DOI, PubMed ID, ORCID iD, OpenAlex ID, or IMDb ID. Returns match=<entity> on success, match=null when not found, and match=null with multipleMatches populated when a Wikidata data integrity issue causes more than one entity to claim the same external ID. The identifier matches through statements of every rank — entities holding it at best rank first, then at another non-deprecated rank, then deprecated — and each match reports the rank of the statement it was found through. The lookup searches both the main Wikidata graph and the scholarly-article graph, where scholarly articles and the DOIs and PubMed IDs on them live; when one does not answer, the result covers the other, with unavailableGraphs naming the one missed. Common cross-server join use cases: CrossRef DOI → Wikidata paper QID (P356), PubMed PMID → Wikidata paper QID (P698), ORCID → author QID (P496), OpenAlex ID → entity QID (P10283). The property must be one whose Wikidata data type is external-id — item-valued or media properties (e.g. P31 instance-of, P18 image) are rejected rather than returning an empty match. Known value forms are normalized automatically. Surrounding whitespace is trimmed. Resolver prefixes are stripped, in any case and with https://, http://, or no scheme: doi.org/, dx.doi.org/, www.doi.org/, and doi: for DOIs; pubmed.ncbi.nlm.nih.gov/, www.ncbi.nlm.nih.gov/pubmed/, and PMID: for PubMed IDs; orcid.org/, www.orcid.org/, and orcid: for ORCID iDs; openalex.org/ and api.openalex.org/ with an optional entity path for OpenAlex IDs; and the title, name, company, and event pages of imdb.com, www.imdb.com, and m.imdb.com for IMDb IDs. DOIs are uppercased, ORCID iDs regrouped with hyphens and an uppercase X check character, and IMDb IDs lowercased. An OpenAlex ID is stored with its entity letter in either case, so it is tried as given and then with that letter in the other case.',
+    'Look up a Wikidata entity by an external identifier such as a DOI, PubMed ID, ORCID iD, OpenAlex ID, or IMDb ID. Returns match=<entity> on success, match=null when not found, and match=null with multipleMatches populated when a Wikidata data integrity issue causes more than one entity to claim the same external ID. The identifier matches through statements of every rank — entities holding it at best rank first, then at another non-deprecated rank, then deprecated — and each match reports the rank of the statement it was found through. The lookup searches both the main Wikidata graph and the scholarly-article graph, where scholarly articles and the DOIs and PubMed IDs on them live; when one does not answer, the result covers the other, with unavailableGraphs naming the one missed. Common cross-server join use cases: CrossRef DOI → Wikidata paper QID (P356), PubMed PMID → Wikidata paper QID (P698), ORCID → author QID (P496), OpenAlex ID → entity QID (P10283). The property must be one whose Wikidata data type is external-id — item-valued or media properties (e.g. P31 instance-of, P18 image) are rejected rather than returning an empty match. Known value forms are normalized automatically. Surrounding whitespace is trimmed. Resolver prefixes are stripped, in any case and with https://, http://, or no scheme: doi.org/, dx.doi.org/, www.doi.org/, and doi: for DOIs; pubmed.ncbi.nlm.nih.gov/, www.ncbi.nlm.nih.gov/pubmed/, and PMID: for PubMed IDs; orcid.org/, www.orcid.org/, and orcid: for ORCID iDs; openalex.org/ and api.openalex.org/ with an optional entity path for OpenAlex IDs; and the title, name, company, and event pages of imdb.com, www.imdb.com, and m.imdb.com for IMDb IDs; ror.org/ for ROR; and arxiv.org/abs/ or arXiv: for arXiv. PMC is stripped from numeric PMCIDs, and ISNI values displayed in four space-separated groups are compacted. DOIs are uppercased, ORCID iDs regrouped with hyphens and an uppercase X check character, and IMDb IDs lowercased. An OpenAlex ID is stored with its entity letter in either case, so it is tried as given and then with that letter in the other case.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -238,7 +255,7 @@ export const wikidataResolveExternalId = tool('wikidata_resolve_external_id', {
       .string()
       .min(1)
       .describe(
-        'The external identifier value to look up (e.g., "10.1038/nature01234" for a DOI, "32283226" for a PubMed ID, "0000-0002-1825-0097" for an ORCID, "A5035517966" for an OpenAlex ID, "tt0111161" for an IMDb ID). A resolver or page URL is accepted for DOI, PubMed, ORCID, OpenAlex, and IMDb IDs — the prefix is stripped before lookup.',
+        'The external identifier value to look up (e.g., "10.1038/nature01234" for a DOI, "32283226" for a PubMed ID, "0000-0002-1825-0097" for an ORCID, "A5035517966" for an OpenAlex ID, "tt0111161" for an IMDb ID). Accepts resolver or page URLs for DOI, PubMed, ORCID, OpenAlex, IMDb, and ROR, and abs URLs for arXiv. Also accepts PMC-prefixed PMCIDs, four space-separated ISNI groups, and arXiv: labels.',
       ),
     language: languageCode()
       .default(DEFAULT_LANGUAGE)

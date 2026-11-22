@@ -79,6 +79,10 @@ export const wikidataGetLabels = tool('wikidata_get_labels', {
         `Distinct IDs past the first ${ID_CAP}, in input order, not looked up in this call — send them in another call. Absent when every ID fit.`,
       ),
     languages: z.array(z.string()).describe('The language codes that were requested.'),
+    unrecognizedLanguages: z
+      .array(z.string())
+      .optional()
+      .describe('Requested codes Wikidata does not recognize for labels and descriptions.'),
   }),
 
   enrichment: {
@@ -86,7 +90,7 @@ export const wikidataGetLabels = tool('wikidata_get_labels', {
       .string()
       .optional()
       .describe(
-        'Present when IDs were deferred: how many resolved, and how many to send again from deferredIds.',
+        'Explains deferred IDs or which requested language codes Wikidata did not recognize.',
       ),
   },
 
@@ -132,21 +136,33 @@ export const wikidataGetLabels = tool('wikidata_get_labels', {
       invalid: invalid.size,
       languages: input.languages,
     });
-    const labelData = await getWikidataRestService().fetchLabels(resolving, input.languages, ctx);
+    const { entities, unrecognizedLanguages } = await getWikidataRestService().fetchLabels(
+      resolving,
+      input.languages,
+      ctx,
+    );
 
+    const notices: string[] = [];
     if (deferredIds.length > 0) {
-      ctx.enrich.notice(
+      notices.push(
         `Resolved the first ${applied} of ${ids.length} distinct IDs, the per-call cap. Call again with the ${deferredIds.length} in deferredIds for the rest.`,
       );
     }
+    if (unrecognizedLanguages.length > 0) {
+      notices.push(
+        `Wikidata did not recognize these language codes for labels and descriptions: ${unrecognizedLanguages.join(', ')}. Use term-language codes such as en or fr.`,
+      );
+    }
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     return {
-      entities: labelData,
-      found: Object.keys(labelData).length,
-      notFound: resolving.filter((id) => !labelData[id]),
+      entities,
+      found: Object.keys(entities).length,
+      notFound: resolving.filter((id) => !entities[id]),
       ...(invalid.size > 0 ? { invalid: [...invalid] } : {}),
       ...(deferredIds.length > 0 ? { deferredIds } : {}),
       languages: input.languages,
+      ...(unrecognizedLanguages.length > 0 ? { unrecognizedLanguages } : {}),
     };
   },
 
@@ -163,6 +179,9 @@ export const wikidataGetLabels = tool('wikidata_get_labels', {
     }
     if (result.deferredIds) {
       lines.push(`**Deferred:** ${result.deferredIds.join(', ')}`);
+    }
+    if (result.unrecognizedLanguages) {
+      lines.push(`**Unrecognized languages:** ${result.unrecognizedLanguages.join(', ')}`);
     }
 
     lines.push('');

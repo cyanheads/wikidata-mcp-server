@@ -22,8 +22,15 @@ const mockNormalizeStatements = vi.fn();
 vi.mock('@/services/wikidata/wikidata-rest-service.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/wikidata/wikidata-rest-service.js')>()),
   getWikidataRestService: () => ({
-    fetchStatements: mockFetchStatements,
-    fetchLabels: mockFetchLabels,
+    fetchStatements: async (
+      ...args: Parameters<
+        import('@/services/wikidata/wikidata-rest-service.js').WikidataRestService['fetchStatements']
+      >
+    ) => ({ id: args[0], statements: await mockFetchStatements(...args) }),
+    fetchLabels: async (...args: Parameters<typeof mockFetchLabels>) => ({
+      entities: await mockFetchLabels(...args),
+      unrecognizedLanguages: [],
+    }),
   }),
   normalizeStatements: (...args: Parameters<typeof mockNormalizeStatements>) =>
     mockNormalizeStatements(...args),
@@ -442,8 +449,19 @@ describe('wikidataGetStatements', () => {
       P569: [1, 2].map((s) => ({
         id: `Q42$birth-${s}`,
         rank: s === 1 ? 'preferred' : 'normal',
-        ...snak('P569', 'time', { time: '+1952-03-11T00:00:00Z', precision: 11 - s }),
-        qualifiers: [snak('P1480', 'wikibase-item', 'Q5727902')],
+        ...snak('P569', 'time', {
+          time: '+1952-03-11T00:00:00Z',
+          precision: 11 - s,
+          ...(s === 2 && { calendarmodel: 'http://www.wikidata.org/entity/Q999999999' }),
+        }),
+        qualifiers: [
+          snak('P1480', 'wikibase-item', 'Q5727902'),
+          snak('P580', 'time', {
+            time: '+1616-04-23T00:00:00Z',
+            precision: 11,
+            calendarmodel: 'http://www.wikidata.org/entity/Q1985786',
+          }),
+        ],
         references: Array.from({ length: 5 }, (_, i) => reference(s * 10 + i)),
       })),
       P625: [
@@ -490,9 +508,22 @@ describe('wikidataGetStatements', () => {
     expect(count(/^ {6}- P\d+: /)).toBe(40);
     expect(count(/^ {2}- P\d+: /)).toBe(all.flatMap((s) => s.qualifiers ?? []).length);
     expect(lines).toContain('- +1952-03-11T00:00:00Z (precision 10: month) ★');
-    expect(lines).toContain('- +1952-03-11T00:00:00Z (precision 9: year)');
-    expect(lines).toContain('- 51.5, -0.1 (precision 0.0001)');
-    expect(count(/^ {6}- P813: \+2022-10-09T00:00:00Z \(precision 11: day\)$/)).toBe(10);
+    expect(statements.P569?.[1]).toMatchObject({ value: { calendarmodel: 'Q999999999' } });
+    expect(lines).toContain('- +1952-03-11T00:00:00Z (precision 9: year), calendar: Q999999999');
+    expect(lines).toContain('- 51.5, -0.1 (precision 0.0001), globe: Earth (Q2)');
+    expect(
+      count(
+        /^ {6}- P813: \+2022-10-09T00:00:00Z \(precision 11: day\), calendar: Gregorian \(Q1985727\)$/,
+      ),
+    ).toBe(10);
+    expect(lines).toContain(
+      '  - P580: +1616-04-23T00:00:00Z (precision 11: day), calendar: Julian (Q1985786)',
+    );
+    expect(statements.P625?.[0]).toMatchObject({ value: { globe: 'Q2' } });
+    expect(statements.P569?.[0]?.qualifiers?.[1]).toMatchObject({
+      value: { calendarmodel: 'Q1985786' },
+    });
+    expect(references[0]?.parts[2]).toMatchObject({ value: { calendarmodel: 'Q1985727' } });
   });
 
   it('format: renders the time and coordinate precision, and a coordinate without one', () => {
@@ -519,7 +550,7 @@ describe('wikidataGetStatements', () => {
             id: 'Q1$c',
             rank: 'normal',
             property: 'P625',
-            value: { type: 'globe-coordinate' as const, latitude: 1, longitude: 2 },
+            value: { type: 'globe-coordinate' as const, latitude: 1, longitude: 2, globe: 'Q405' },
           },
         ],
       },
@@ -531,7 +562,7 @@ describe('wikidataGetStatements', () => {
 
     expect(lines).toContain('- -13798000000-00-00T00:00:00Z (precision 3: million years)');
     expect(lines).toContain('- +2001-00-00T00:00:00Z (precision 15)');
-    expect(lines).toContain('- 1, 2');
+    expect(lines).toContain('- 1, 2, globe: Q405');
     expect(lines).toContain('  - id: Q1$c');
   });
 

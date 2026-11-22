@@ -75,6 +75,39 @@ describe('wikidataGetEntity', () => {
     expect(result.fieldsReturned).toContain('labels');
   });
 
+  it('keeps the raw globe URI on the entity statement', async () => {
+    mockFetchEntity.mockResolvedValue({
+      id: 'Q520',
+      type: 'item',
+      statements: {
+        P625: [
+          {
+            id: 'Q520$coord',
+            rank: 'normal',
+            property: { id: 'P625', data_type: 'globe-coordinate' },
+            value: {
+              type: 'value',
+              content: {
+                latitude: 18.65,
+                longitude: 226.2,
+                globe: 'http://www.wikidata.org/entity/Q111',
+              },
+            },
+          },
+        ],
+      },
+    });
+    const result = await runToolContract(wikidataGetEntity, { id: 'Q520', fields: ['statements'] });
+    expect(result.structuredContent).toMatchObject({
+      statements: {
+        P625: [{ value: { content: { globe: 'http://www.wikidata.org/entity/Q111' } } }],
+      },
+    });
+    expect(result.content).toEqual([
+      { type: 'text', text: expect.stringContaining('Mars (Q111)') },
+    ]);
+  });
+
   it('filters to requested fields only', async () => {
     mockFetchEntity.mockResolvedValue(mockEntity);
 

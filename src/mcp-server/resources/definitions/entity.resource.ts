@@ -53,7 +53,11 @@ export const wikidataEntityResource = resource('wikidata://entity/{id}', {
     // items like Q76 carry only a mul label and would otherwise render as a bare QID.
     const enLabel = resolveLangValue(entity.labels, 'en');
     const multilineLabel = enLabel !== undefined && /[\r\n]/.test(enLabel);
-    lines.push(`# ${enLabel && !multilineLabel ? `${escapeMarkdownInline(enLabel)} (${id})` : id}`);
+    const headingId = escapeMarkdownInline(entity.id);
+    lines.push(
+      `# ${enLabel && !multilineLabel ? `${escapeMarkdownInline(enLabel)} (${headingId})` : headingId}`,
+    );
+    if (entity.id !== id) lines.push(`**Redirected from:** ${id}`);
     if (multilineLabel) lines.push(`**Label:** ${escapeMarkdownInline(enLabel)}`);
 
     // English description
@@ -119,7 +123,7 @@ export const wikidataEntityResource = resource('wikidata://entity/{id}', {
     }
 
     lines.push('');
-    lines.push(`**Wikidata URL:** https://www.wikidata.org/wiki/${id}`);
+    lines.push(`**Wikidata URL:** https://www.wikidata.org/wiki/${encodeURIComponent(entity.id)}`);
 
     return lines.join('\n');
   },

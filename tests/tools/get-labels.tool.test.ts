@@ -18,7 +18,12 @@ const mockFetchLabels = vi.fn();
  */
 vi.mock('@/services/wikidata/wikidata-rest-service.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/wikidata/wikidata-rest-service.js')>()),
-  getWikidataRestService: () => ({ fetchLabels: mockFetchLabels }),
+  getWikidataRestService: () => ({
+    fetchLabels: async (...args: Parameters<typeof mockFetchLabels>) => ({
+      entities: await mockFetchLabels(...args),
+      unrecognizedLanguages: [],
+    }),
+  }),
 }));
 
 /** `count` distinct Q-IDs starting at Q`from`. */

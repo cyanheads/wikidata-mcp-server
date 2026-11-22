@@ -95,12 +95,17 @@ export type WbEntity = {
 export type WbGetEntitiesResponse = {
   entities?: Record<string, WbEntity>;
   success?: number;
-  error?: {
+  errors?: Array<{
     code: string;
-    info: string;
+    text: string;
     /** The offending entity ID on a `no-such-entity` error. Only the first bad ID is named. */
-    id?: string;
-  };
+    data?: { id?: string };
+  }>;
+  warnings?: Array<{
+    code: string;
+    module: string;
+    data?: { values?: string[] };
+  }>;
   servedby?: string;
 };
 
@@ -149,7 +154,7 @@ export type StatementValue =
   | { type: 'wikibase-item'; qid: string; label?: string | undefined }
   /** A property, lexeme, form, sense, or entity-schema reference (`P279`, `L37633-F1`, `E10`). The value carries no label; a property's label is reported beside it in `propertyLabels`. */
   | { type: 'entity-id'; entityType: EntityIdKind; id: string }
-  | { type: 'time'; time: string; precision: number }
+  | { type: 'time'; time: string; precision: number; calendarmodel?: string }
   | {
       type: 'quantity';
       amount: string;
@@ -166,6 +171,7 @@ export type StatementValue =
       latitude: number;
       longitude: number;
       precision?: number | undefined;
+      globe?: string;
     }
   /** An unknown value (`somevalue`) or an explicit absence (`novalue`) — no data by design. */
   | { type: 'somevalue' | 'novalue' }

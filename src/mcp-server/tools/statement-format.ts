@@ -30,6 +30,21 @@ const TIME_PRECISION: Record<number, string> = {
 /** P-ID → label, for the properties a statement set names. */
 type PropertyLabels = Record<string, string>;
 
+const CALENDARS = new Map([
+  ['Q1985727', 'Gregorian'],
+  ['Q1985786', 'Julian'],
+]);
+const GLOBES = new Map([
+  ['Q2', 'Earth'],
+  ['Q111', 'Mars'],
+]);
+
+/** Include the identifier even when its familiar name is available. */
+function namedId(id: string, names: ReadonlyMap<string, string>): string {
+  const name = names.get(id);
+  return name ? `${name} (${id})` : id;
+}
+
 /** The complete human-readable representation, before Markdown encoding. */
 function statementValueText(
   value: NormalizedStatement['value'],
@@ -44,7 +59,10 @@ function statementValueText(
     }
     case 'time': {
       const name = TIME_PRECISION[value.precision];
-      return `${value.time} (precision ${value.precision}${name ? `: ${name}` : ''})`;
+      const calendar = value.calendarmodel
+        ? `, calendar: ${namedId(value.calendarmodel, CALENDARS)}`
+        : '';
+      return `${value.time} (precision ${value.precision}${name ? `: ${name}` : ''})${calendar}`;
     }
     case 'quantity': {
       const bounded =
@@ -61,10 +79,11 @@ function statementValueText(
       return value.value;
     case 'monolingualtext':
       return `${value.text} [${value.language}]`;
-    case 'globe-coordinate':
-      return value.precision !== undefined
-        ? `${value.latitude}, ${value.longitude} (precision ${value.precision})`
-        : `${value.latitude}, ${value.longitude}`;
+    case 'globe-coordinate': {
+      const precision = value.precision === undefined ? '' : ` (precision ${value.precision})`;
+      const globe = value.globe ? `, globe: ${namedId(value.globe, GLOBES)}` : '';
+      return `${value.latitude}, ${value.longitude}${precision}${globe}`;
+    }
     case 'somevalue':
       return 'unknown value';
     case 'novalue':

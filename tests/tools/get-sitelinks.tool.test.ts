@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { wikidataGetSitelinks } from '@/mcp-server/tools/definitions/get-sitelinks.tool.js';
 
 const mockFetchSitelinks = vi.fn();
+const mockMissingSites = vi.fn<() => string[]>(() => []);
 
 /**
  * Stub only the service accessor — the module's pure helpers (isEntityNotFoundError,
@@ -16,7 +17,17 @@ const mockFetchSitelinks = vi.fn();
  */
 vi.mock('@/services/wikidata/wikidata-rest-service.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/wikidata/wikidata-rest-service.js')>()),
-  getWikidataRestService: () => ({ fetchSitelinks: mockFetchSitelinks }),
+  getWikidataRestService: () => ({
+    fetchSitelinks: async (
+      ...args: Parameters<
+        import('@/services/wikidata/wikidata-rest-service.js').WikidataRestService['fetchSitelinks']
+      >
+    ) => ({
+      id: args[0],
+      sitelinks: await mockFetchSitelinks(...args),
+      notFound: mockMissingSites(),
+    }),
+  }),
 }));
 
 /** Mirrors what fetchWithTimeout rejects with on a non-2xx: an McpError carrying data.status. */
@@ -180,6 +191,7 @@ describe('wikidataGetSitelinks', () => {
 
   it('returns message when sites filter matches nothing', async () => {
     mockFetchSitelinks.mockResolvedValue({});
+    mockMissingSites.mockReturnValueOnce(['zwwiki']);
 
     const ctx = createMockContext({ errors: wikidataGetSitelinks.errors });
     const input = wikidataGetSitelinks.input.parse({ id: 'Q76', sites: ['zwwiki'] });

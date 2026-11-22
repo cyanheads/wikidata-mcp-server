@@ -175,7 +175,11 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
   inputAliases: { language: 'languages' },
 
   output: z.object({
-    id: z.string().describe('Normalized entity ID (e.g., "Q76" or "P31").'),
+    id: z.string().describe('Resolved entity ID (e.g., "Q76" or "P31").'),
+    redirectedFrom: z
+      .string()
+      .optional()
+      .describe('The normalized requested ID when it redirects to id.'),
     type: z.string().describe('Entity type: "item" or "property".'),
     kind: z
       .enum(['full', 'outline'])
@@ -323,6 +327,7 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
     /** Cheap metadata — kept in both arms. */
     const base: Record<string, unknown> = {
       id: entity.id,
+      ...(entity.id !== id ? { redirectedFrom: id } : {}),
       type: entity.type,
       fieldsReturned: [...requestedFields],
       ...(entity.data_type ? { data_type: entity.data_type } : {}),
@@ -393,7 +398,10 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
         ...base,
         kind: 'outline',
         sections,
-        retrieval_notice: buildNotice(categories, sections),
+        retrieval_notice:
+          entity.id === id
+            ? buildNotice(categories, sections)
+            : `Use id: "${entity.id}" for follow-up requests. ${buildNotice(categories, sections)}`,
       } as never;
     }
 
@@ -408,6 +416,7 @@ export const wikidataGetEntity = tool('wikidata_get_entity', {
   format: (result) => {
     const lines: string[] = [`## ${result.id} (${result.type})`];
 
+    if (result.redirectedFrom) lines.push(`**Redirected from:** ${result.redirectedFrom}`);
     if (result.data_type) lines.push(`**Data type:** ${result.data_type}`);
     lines.push(
       `**Fields returned:** ${result.fieldsReturned.join(', ')} | **Response:** ${result.kind}`,

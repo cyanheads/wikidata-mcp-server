@@ -4,7 +4,7 @@ description: Use wikidata_* tools to identify entities, verify qualified claims,
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.1"
+  version: "1.2"
 ---
 
 ## Scope
@@ -25,7 +25,7 @@ Use Wikidata for structured relationships, identifiers, multilingual entity name
 2. **Separate resolver outcomes.** Inspect `multipleMatches` before interpreting a null match as a miss; fetch candidates to disambiguate them. Check `unavailableGraphs` too: a graph named there (`wikidata_main` or `scholarly_articles`) was not searched, so retry before calling the result a miss. An ordinary null means no indexed match, not proof of absence: the Query Service can lag the live wiki. Inspect known candidate entities directly when recent edits matter. A match's `rank` says how the entity holds the identifier; `deprecated` usually means a retired or mistaken ID, so confirm the entity before relying on it.
 3. **Retrieve claims before citing them.** A `kind: "outline"` response contains an inventory, not the statements or entity fields. Follow `retrieval_notice`; do not turn section names or counts into evidence.
 4. **Read statement context before making a factual conclusion.** Inspect rank, qualifiers, and references, keeping each reference's parts together. Preferred rank can express recency or consensus; it does not alone establish that a value is current. For a property's current-best values, `rank: "best"` on `wikidata_get_statements` keeps the preferred statements, or the normal ones when none is preferred, and never deprecated ones — the same statements SPARQL's truthy `wdt:` reads. Check time qualifiers for time-sensitive claims, and state when Wikidata supplies no supporting reference.
-5. **Preserve the value's meaning.** `somevalue` means an unknown value, `novalue` an explicit absence; neither means a missing property. Preserve time precision, quantity units and bounds, coordinate precision, and language tags when present. Do not convert a year-precision time into a known day, or an unresolved Q-ID into a guessed label.
+5. **Preserve the value's meaning.** `somevalue` means an unknown value, `novalue` an explicit absence; neither means a missing property. Keep the calendar model and precision with each time value, the globe and precision with each coordinate, quantity units and bounds, and language tags when present. A year-precision time gives only a year, and an unresolved Q-ID still needs a label lookup.
 6. **Check coverage before saying “all” or “none.”** Inspect search pagination, SPARQL counts and notices, statement paging, and label lookup misses. A SPARQL call returns at most 4,000 rows; a larger result comes back with `truncated: true`, `shown`, `cap`, and a notice, and without `totalCount`, since the rows past the ceiling were never read. Statements return 10 per property by default: `propertyTotals` counts what each property holds, and `nextOffset` continues every property. Labels past the first 500 distinct IDs come back in `deferredIds`. A missing flag, a LIMIT-bounded query, or a page of results does not prove completeness. Describe an empty query as no matching indexed rows under that query's conditions.
 
 ## Core chain
@@ -36,13 +36,13 @@ Resolve identity → discover relevant properties → retrieve targeted statemen
 
 ### Verify a named entity's fact
 
-Search the name, then inspect plausible candidates with `wikidata_get_entity`. Find the predicate with property search if its P-ID is unknown. Use `wikidata_get_statements` for the chosen entity and relevant predicates; it labels the properties it returns in `propertyLabels`. For an affiliation or office, examine date qualifiers before presenting it as current; for a quantity, keep the unit beside the value.
+Search the name. When you know the entity's class, use the [class-scoped search pattern](references/sparql-patterns.md#search-a-name-within-a-class) to narrow ambiguous candidates. Inspect plausible candidates with `wikidata_get_entity`. Find the predicate with property search if its P-ID is unknown. Use `wikidata_get_statements` for the chosen entity and relevant predicates; it labels the properties it returns in `propertyLabels`. For an affiliation or office, examine date qualifiers before presenting it as current; for a quantity, keep the unit beside the value.
 
 If the entity fetch outlines statements, switch to `wikidata_get_statements`. If that tool outlines properties, retrieve only those needed for the question, following its notice with the same `limit`, `offset`, and `rank`. A single property is never outlined: it returns its `limit` statements from `offset`, so page it with `nextOffset` when `propertyTotals` shows more. For oversized sitelinks, use `wikidata_get_sitelinks`; narrow multilingual fields on the entity fetch instead of repeatedly requesting the same oversized category.
 
 ### Join an external record to Wikidata and Wikipedia
 
-Start with the identifier in the source record and resolve it with `wikidata_resolve_external_id`. Check the echoed normalized value, especially for identifier schemes other than DOI, PubMed, ORCID, OpenAlex, and IMDb, whose value is passed through without scheme-specific normalization. DOIs and PubMed IDs of scholarly articles resolve too: the lookup searches the scholarly-article graph beside the main one. On ambiguity, compare candidate entities against the source record. On success, retrieve the needed statements or use `wikidata_get_sitelinks` for article URLs. No sitelink means no link was returned for that item and selection, not that Wikipedia has no relevant article.
+Start with the identifier in the source record and resolve it with `wikidata_resolve_external_id`. The tool echoes the value searched. It normalizes recognized forms for DOI, PubMed, ORCID, OpenAlex, IMDb, PMCID, ROR, ISNI, and arXiv. For other schemes, supply the stored form; only surrounding whitespace is trimmed. The lookup searches both the main and scholarly-article graphs. On ambiguity, compare candidate entities against the source record. On success, retrieve the needed statements or use `wikidata_get_sitelinks` for article URLs. No sitelink means no link was returned for that item and selection, not that Wikipedia has no relevant article.
 
 ### Query relationships or aggregate a set
 

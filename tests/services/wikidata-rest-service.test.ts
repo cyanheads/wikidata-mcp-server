@@ -8,12 +8,16 @@
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { wikidataGetEntity } from '@/mcp-server/tools/definitions/get-entity.tool.js';
+import { wikidataGetSitelinks } from '@/mcp-server/tools/definitions/get-sitelinks.tool.js';
+import { wikidataGetStatements } from '@/mcp-server/tools/definitions/get-statements.tool.js';
 import type { RawStatement } from '@/services/wikidata/types.js';
 import {
   collectLabelPids,
   collectLabelQids,
+  initWikidataRestService,
   isEntityNotFoundError,
   isPId,
   isQId,
@@ -52,17 +56,22 @@ const respondWithStatus = (status: number, statusText: string, body = '{}') =>
 
 /** The wbgetentities top-level rejection for an out-of-range ID. Only the first bad ID is named. */
 const noSuchEntity = (id: string) => ({
-  error: {
-    code: 'no-such-entity',
-    info: `Could not find an entity with the ID "${id}".`,
-    id,
-  },
+  errors: [
+    {
+      code: 'no-such-entity',
+      text: `Could not find an entity with the ID "${id}".`,
+      data: { id },
+    },
+  ],
 });
 
 const label = (value: string, lang = 'en') => ({ language: lang, value });
 
 /** The url string of the Nth fetch call (0-based). */
 const urlOf = (call: number) => String(mockFetch.mock.calls[call]?.[0]);
+
+const textOf = (result: { content: unknown[] }) =>
+  result.content.map((block) => (block as { text?: string }).text ?? '').join('\n');
 
 describe('WikidataRestService', () => {
   beforeEach(() => {
@@ -74,6 +83,246 @@ describe('WikidataRestService', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  describe('entity lookup contracts', () => {
+    const claim = (
+      id: string,
+      property: string,
+      rank: RawStatement['rank'] = 'normal',
+    ): RawStatement => ({
+      id,
+      rank,
+      property: { id: property, data_type: 'string' },
+      value: { type: 'value', content: id },
+    });
+    const rest = 'https://www.wikidata.org/w/rest.php/wikibase/v1/entities';
+    const respondAt = (url: string, body: unknown) =>
+      mockFetch.mockImplementation(() =>
+        Object.defineProperty(jsonResponse(body), 'url', { value: url }),
+      );
+
+    beforeEach(() => {
+      initWikidataRestService({} as AppConfig, {} as StorageService);
+    });
+
+    it('#60 preserves a single-property selector and pages the target through a redirect', async () => {
+      respondAt(`${rest}/items/Q296/statements`, {
+        P569: [claim('first', 'P569'), claim('second', 'P569'), claim('third', 'P569')],
+        P31: [claim('unrelated', 'P31')],
+      });
+      const input = { id: 'wd:q20793034', properties: ['P569'], limit: 1, resolve_labels: false };
+
+      const first = await runToolContract(wikidataGetStatements, input);
+      const second = await runToolContract(wikidataGetStatements, { ...input, offset: 1 });
+      expect(first.structuredContent).toHaveProperty('propertyTotals', { P569: 3 });
+      expect(first.structuredContent).toMatchObject({
+        id: 'Q296',
+        redirectedFrom: 'Q20793034',
+        kind: 'full',
+        propertyTotals: { P569: 3 },
+        statements: { P569: [{ id: 'first' }] },
+        nextOffset: 1,
+      });
+      expect(second.structuredContent).toMatchObject({
+        id: 'Q296',
+        redirectedFrom: 'Q20793034',
+        statements: { P569: [{ id: 'second' }] },
+        nextOffset: 2,
+      });
+      expect(textOf(second)).toContain('## Statements for Q296');
+      expect(textOf(second)).toContain('**Redirected from:** Q20793034');
+      expect(textOf(second)).not.toContain('P31');
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(urlOf(0)).toBe(`${rest}/items/Q20793034/statements?property=P569`);
+    });
+
+    it('#60 reports an entity redirect without changing the requested fields', async () => {
+      respondAt(`${rest}/items/Q296?_fields=labels%2Ctype`, {
+        id: 'Q296',
+        type: 'item',
+        labels: { en: 'Claude Monet' },
+      });
+
+      const result = await runToolContract(wikidataGetEntity, {
+        id: 'Q20793034',
+        fields: ['labels'],
+      });
+
+      expect(result.structuredContent).toMatchObject({
+        id: 'Q296',
+        redirectedFrom: 'Q20793034',
+        fieldsReturned: ['labels'],
+      });
+      expect(textOf(result)).toContain('**Redirected from:** Q20793034');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(urlOf(0)).toBe(`${rest}/items/Q20793034?_fields=labels,type`);
+    });
+
+    it('#60/#64 use the target in outline guidance and keep absent properties outside sections', async () => {
+      const data = {
+        P31: [claim('a'.repeat(15_000), 'P31')],
+        P569: [claim('b'.repeat(15_000), 'P569')],
+        P27: [claim('unrelated', 'P27')],
+      };
+      respondAt(`${rest}/items/Q296/statements`, data);
+      const input = { id: 'Q20793034', resolve_labels: false };
+
+      const outline = await runToolContract(wikidataGetStatements, {
+        ...input,
+        properties: ['P31', 'P569', 'P1082'],
+      });
+      expect(outline.structuredContent).toMatchObject({
+        id: 'Q296',
+        redirectedFrom: 'Q20793034',
+        kind: 'outline',
+        sections: [{ name: 'P569' }, { name: 'P31' }],
+        propertyTotals: { P31: 1, P569: 1, P1082: 0 },
+        notice: 'Q296 has no statements for P1082.',
+      });
+      expect(outline.structuredContent).toHaveProperty(
+        'retrieval_notice',
+        expect.stringContaining('id: "Q296"'),
+      );
+      expect(textOf(outline)).toContain('id: "Q296"');
+      expect(textOf(outline)).toContain('Q296 has no statements for P1082.');
+
+      const all = await runToolContract(wikidataGetStatements, { ...input, properties: [] });
+      expect(all.structuredContent).toHaveProperty('propertyTotals', { P31: 1, P569: 1, P27: 1 });
+      expect(all.structuredContent).not.toHaveProperty('notice');
+      expect(all.structuredContent).toHaveProperty('redirectedFrom', 'Q20793034');
+    });
+
+    it('#60/#64 retain redirect metadata with an all-missing property selection', async () => {
+      respondAt(`${rest}/items/Q296/statements`, { P31: [claim('unrelated', 'P31')] });
+      const result = await runToolContract(wikidataGetStatements, {
+        id: 'Q20793034',
+        properties: ['P1082'],
+        rank: 'best',
+      });
+
+      expect(result.structuredContent).toMatchObject({
+        id: 'Q296',
+        redirectedFrom: 'Q20793034',
+        kind: 'full',
+        statements: {},
+        propertyTotals: { P1082: 0 },
+        notice: 'Q296 has no statements for P1082.',
+      });
+      expect(result.structuredContent).not.toHaveProperty('nextOffset');
+      expect(textOf(result)).toContain('P1082: 0');
+      expect(textOf(result)).not.toContain('only deprecated');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('#60 identifies a redirected item from an empty sitelink response', async () => {
+      respondAt(`${rest}/items/Q296/sitelinks`, {});
+
+      const result = await runToolContract(wikidataGetSitelinks, { id: 'Q20793034' });
+
+      expect(result.structuredContent).toMatchObject({
+        id: 'Q296',
+        redirectedFrom: 'Q20793034',
+        sitelinks: {},
+        message: 'Q296 has no sitelinks.',
+      });
+      expect(textOf(result)).toContain('**Redirected from:** Q20793034');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('#64 distinguishes absent, deprecated-only, and paged-past statements', async () => {
+      respondWith({
+        P2002: [claim('deprecated', 'P2002', 'deprecated')],
+        P569: [claim('first', 'P569')],
+        P31: [{ ...claim('no-value', 'P31'), value: { type: 'novalue' } }],
+      });
+
+      const result = await runToolContract(wikidataGetStatements, {
+        id: 'Q76',
+        properties: ['P2002', 'wd:p1082', 'P1082', 'P569', 'P31'],
+        rank: 'best',
+        offset: 2,
+        limit: 501,
+        resolve_labels: false,
+      });
+
+      expect(result.structuredContent).toMatchObject({
+        propertyTotals: { P2002: 0, P1082: 0, P569: 1, P31: 1 },
+        returnedCount: 0,
+        statements: {},
+      });
+      expect(result.structuredContent).not.toHaveProperty('nextOffset');
+      expect(result.structuredContent).not.toHaveProperty('redirectedFrom');
+      expect(result.structuredContent).toHaveProperty(
+        'notice',
+        expect.stringContaining('Q76 has no statements for P1082.'),
+      );
+      expect(result.structuredContent).toHaveProperty(
+        'notice',
+        expect.stringContaining('P2002 holds only deprecated statements'),
+      );
+      expect(textOf(result)).not.toContain('P1082 holds only deprecated');
+      expect(textOf(result)).toContain('P1082: 0');
+      expect(textOf(result)).toContain('Q76 has no statements for P1082.');
+      expect(textOf(result)).toContain('limit 501 was served as 500');
+      expect(textOf(result)).toContain('offset 2 is past the end');
+    });
+
+    it('#64 reports normalized absent site codes separately from sites excluded by wikis_only', async () => {
+      respondWith({
+        enwiki: { title: 'Claude Monet', url: 'https://en.wikipedia.org/wiki/Claude_Monet' },
+        commonswiki: {
+          title: 'Claude Monet',
+          url: 'https://commons.wikimedia.org/wiki/Claude_Monet',
+        },
+      });
+      const sites = ['commonswiki', ' XXwiki ', 'xxwiki'];
+
+      const empty = await runToolContract(wikidataGetSitelinks, {
+        id: 'Q296',
+        sites,
+        wikis_only: true,
+      });
+      const mixed = await runToolContract(wikidataGetSitelinks, {
+        id: 'Q296',
+        sites: [...sites, 'ENWIKI'],
+        wikis_only: true,
+      });
+
+      expect(empty.structuredContent).toMatchObject({ count: 0, notFound: ['xxwiki'] });
+      expect(empty.structuredContent).toHaveProperty(
+        'message',
+        expect.stringContaining('commonswiki on Q296 is not a Wikipedia edition'),
+      );
+      expect(textOf(empty)).toContain('commonswiki on Q296 is not a Wikipedia edition');
+      expect(mixed.structuredContent).toMatchObject({
+        count: 1,
+        notFound: ['xxwiki'],
+        sitelinks: { enwiki: { title: 'Claude Monet' } },
+      });
+      expect(mixed.structuredContent).toHaveProperty('message', expect.stringContaining('xxwiki'));
+      expect(textOf(mixed)).toContain('**Not found:** xxwiki');
+    });
+
+    it('#64 leaves malformed properties and absent entities on their existing error contracts', async () => {
+      const invalid = await runToolContract(wikidataGetStatements, {
+        id: 'Q76',
+        properties: ['Q31'],
+      });
+      expect(invalid.isError).toBe(true);
+      expect(textOf(invalid)).toContain('invalid_property');
+      expect(textOf(invalid)).toContain('Every properties entry must be P followed by digits');
+      expect(mockFetch).not.toHaveBeenCalled();
+
+      respondWithStatus(404, 'Not Found', '{"code":"resource-not-found"}');
+      const missing = await runToolContract(wikidataGetSitelinks, {
+        id: 'Q99999999',
+        sites: ['enwiki'],
+      });
+      expect(missing.isError).toBe(true);
+      expect(textOf(missing)).toContain('entity_not_found');
+      expect(textOf(missing)).toContain('Verify the Q-ID');
+    });
   });
 
   describe('fetchLabels — language fallback', () => {
@@ -93,7 +342,11 @@ describe('WikidataRestService', () => {
       });
 
       const svc = makeService();
-      const result = await svc.fetchLabels(['Q76'], ['en', 'de'], createMockContext());
+      const { entities: result } = await svc.fetchLabels(
+        ['Q76'],
+        ['en', 'de'],
+        createMockContext(),
+      );
 
       expect(urlOf(0)).toContain('languagefallback=1');
       expect(result.Q76?.labels).toEqual({ en: 'Barack Obama', de: 'Barack Obama' });
@@ -112,7 +365,7 @@ describe('WikidataRestService', () => {
       });
 
       const svc = makeService();
-      const result = await svc.fetchLabels(
+      const { entities: result } = await svc.fetchLabels(
         ['Q76', 'P31', 'Q999999999999'],
         ['en'],
         createMockContext(),
@@ -139,7 +392,7 @@ describe('WikidataRestService', () => {
       respondOnceWith({ entities: { Q76: { id: 'Q76', labels: { en: label('Barack Obama') } } } });
 
       const svc = makeService();
-      const result = await svc.fetchLabels(
+      const { entities: result } = await svc.fetchLabels(
         ['Q76', 'Q999999999999', 'Q888888888888'],
         ['en'],
         createMockContext(),
@@ -165,7 +418,7 @@ describe('WikidataRestService', () => {
       });
 
       const svc = makeService();
-      const result = await svc.fetchLabels(
+      const { entities: result } = await svc.fetchLabels(
         ['Q76', 'P31', 'Q99999999'],
         ['en'],
         createMockContext(),
@@ -180,7 +433,11 @@ describe('WikidataRestService', () => {
       respondOnceWith(noSuchEntity('Q999999999999'));
 
       const svc = makeService();
-      const result = await svc.fetchLabels(['Q999999999999'], ['en'], createMockContext());
+      const { entities: result } = await svc.fetchLabels(
+        ['Q999999999999'],
+        ['en'],
+        createMockContext(),
+      );
 
       expect(result).toEqual({});
       // The batch empties out after the single bad ID is dropped — no second request.
@@ -189,7 +446,9 @@ describe('WikidataRestService', () => {
 
     /** A real API failure must surface, not masquerade as "none of these IDs exist". */
     it('throws on a top-level error that is not no-such-entity', async () => {
-      respondWith({ error: { code: 'param-missing', info: 'The required parameter is missing.' } });
+      respondWith({
+        errors: [{ code: 'param-missing', text: 'The required parameter is missing.' }],
+      });
 
       const svc = makeService();
       await expect(svc.fetchLabels(['Q76'], ['en'], createMockContext())).rejects.toThrow(
@@ -252,7 +511,11 @@ describe('WikidataRestService', () => {
       const stats = trackConcurrency();
       const ids = Array.from({ length: 1_150 }, (_, i) => `Q${i + 1}`);
 
-      const result = await makeService().fetchLabels(ids, ['en'], createMockContext());
+      const { entities: result } = await makeService().fetchLabels(
+        ids,
+        ['en'],
+        createMockContext(),
+      );
 
       expect(stats.started).toBe(23);
       expect(stats.peak).toBe(4);
@@ -264,7 +527,11 @@ describe('WikidataRestService', () => {
     it('sends a single batch alone', async () => {
       const stats = trackConcurrency();
 
-      const result = await makeService().fetchLabels(['Q76', 'P31'], ['en'], createMockContext());
+      const { entities: result } = await makeService().fetchLabels(
+        ['Q76', 'P31'],
+        ['en'],
+        createMockContext(),
+      );
 
       expect(stats.started).toBe(1);
       expect(Object.keys(result).sort()).toEqual(['P31', 'Q76']);
@@ -286,7 +553,11 @@ describe('WikidataRestService', () => {
       });
       const ids = Array.from({ length: 150 }, (_, i) => `Q${i + 1}`);
 
-      const result = await makeService().fetchLabels(ids, ['en'], createMockContext());
+      const { entities: result } = await makeService().fetchLabels(
+        ids,
+        ['en'],
+        createMockContext(),
+      );
 
       expect(Object.keys(result)).toEqual(ids);
     });
@@ -296,7 +567,7 @@ describe('WikidataRestService', () => {
       mockFetch.mockImplementation(async () => {
         started++;
         await new Promise((resolve) => setTimeout(resolve, 5));
-        return jsonResponse({ error: { code: 'param-missing', info: 'Missing.' } });
+        return jsonResponse({ errors: [{ code: 'param-missing', text: 'Missing.' }] });
       });
       const ids = Array.from({ length: 1_000 }, (_, i) => `Q${i + 1}`);
 
@@ -384,8 +655,8 @@ describe('WikidataRestService', () => {
 
         expect(stats.peak).toBe(4);
         expect(stats.startedIds).toHaveLength(600);
-        expect(results.map((r) => Object.keys(r).length)).toEqual([200, 200, 200]);
-        expect(results[2]?.Q2200?.labels.en).toBe('label Q2200');
+        expect(results.map((r) => Object.keys(r.entities).length)).toEqual([200, 200, 200]);
+        expect(results[2]?.entities.Q2200?.labels.en).toBe('label Q2200');
       });
 
       it('a call cancelled while queued never starts its batches, and frees the queue for others', async () => {
@@ -396,7 +667,7 @@ describe('WikidataRestService', () => {
         // First call takes all 4 slots; the second (4 batches) waits behind it.
         const first = svc.fetchLabels(ids(1, 200), ['en'], createMockContext()).then((r) => {
           settled.push('first');
-          return r;
+          return r.entities;
         });
         const controller = new AbortController();
         const cancelled = svc
@@ -417,7 +688,11 @@ describe('WikidataRestService', () => {
 
         // Every slot came back: a fresh 4-batch call runs all 4 at once.
         stats.peak = 0;
-        const after = await svc.fetchLabels(ids(9001, 200), ['en'], createMockContext());
+        const { entities: after } = await svc.fetchLabels(
+          ids(9001, 200),
+          ['en'],
+          createMockContext(),
+        );
         expect(stats.peak).toBe(4);
         expect(Object.keys(after)).toHaveLength(200);
       });
@@ -454,7 +729,9 @@ describe('WikidataRestService', () => {
             () => 'resolved',
             (error: unknown) => error,
           );
-        const bystander = svc.fetchLabels(ids(7001, 100), ['en'], createMockContext());
+        const bystander = svc
+          .fetchLabels(ids(7001, 100), ['en'], createMockContext())
+          .then((r) => r.entities);
         // Abort once the first wave is in flight: 4 of the doomed call's 8 batches.
         await firstWave.promise;
         controller.abort();
@@ -473,7 +750,7 @@ describe('WikidataRestService', () => {
       it('returns every slot after an upstream failure', async () => {
         const stats = trackShared((url) =>
           idsOf(url).includes('Q1')
-            ? { error: { code: 'param-missing', info: 'Missing.' } }
+            ? { errors: [{ code: 'param-missing', text: 'Missing.' }] }
             : undefined,
         );
         const svc = makeService();
@@ -485,12 +762,16 @@ describe('WikidataRestService', () => {
 
         expect(failed.status).toBe('rejected');
         expect(survivor.status).toBe('fulfilled');
-        expect(Object.keys(survivor.status === 'fulfilled' ? survivor.value : {})).toHaveLength(
-          300,
-        );
+        expect(
+          Object.keys(survivor.status === 'fulfilled' ? survivor.value.entities : {}),
+        ).toHaveLength(300);
 
         stats.peak = 0;
-        const after = await svc.fetchLabels(ids(9001, 200), ['en'], createMockContext());
+        const { entities: after } = await svc.fetchLabels(
+          ids(9001, 200),
+          ['en'],
+          createMockContext(),
+        );
         expect(stats.peak).toBe(4);
         expect(Object.keys(after)).toHaveLength(200);
       });
@@ -572,7 +853,7 @@ describe('WikidataRestService', () => {
 
         const result = await makeService().fetchSitelinks('Q42', sites, createMockContext());
 
-        expect(result).toEqual({ enwiki: sitelinks.enwiki });
+        expect(result.sitelinks).toEqual({ enwiki: sitelinks.enwiki });
       },
     );
 
@@ -585,7 +866,8 @@ describe('WikidataRestService', () => {
         createMockContext(),
       );
 
-      expect(Object.keys(result)).toEqual(['dewiki', 'enwikiquote']);
+      expect(Object.keys(result.sitelinks)).toEqual(['dewiki', 'enwikiquote']);
+      expect(result.notFound).toEqual(['frwiki']);
     });
 
     it('returns every sitelink when no sites are requested', async () => {
@@ -593,13 +875,22 @@ describe('WikidataRestService', () => {
 
       const result = await makeService().fetchSitelinks('Q42', undefined, createMockContext());
 
-      expect(result).toEqual(sitelinks);
+      expect(result.sitelinks).toEqual(sitelinks);
     });
   });
 
   /** A `properties` entry in any form `normalizeId` accepts reaches upstream as its bare P-ID. */
   describe('fetchStatements — properties forms', () => {
     const statements = { P31: [], P569: [], P27: [] };
+
+    it('sends a direct P-ID entity lookup to the property endpoint in one request', async () => {
+      respondWith({ P31: [] });
+
+      await makeService().fetchStatements('wd:p279', ['P31'], createMockContext());
+
+      expect(urlOf(0)).toMatch(/\/entities\/properties\/P279\/statements\?property=P31$/);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
 
     it.each([['P31'], ['p31'], [' P31 '], ['wd:P31'], ['http://www.wikidata.org/entity/P31']])(
       'sends a single property %j as ?property=P31',
@@ -622,7 +913,7 @@ describe('WikidataRestService', () => {
       );
 
       expect(urlOf(0)).toMatch(/\/entities\/items\/Q42\/statements$/);
-      expect(Object.keys(result).sort()).toEqual(['P27', 'P31', 'P569']);
+      expect(Object.keys(result.statements).sort()).toEqual(['P27', 'P31', 'P569']);
     });
   });
 
@@ -1132,6 +1423,26 @@ describe('WikidataRestService', () => {
         { type: 'monolingualtext', text: 'Douglas Adams', language: 'en' },
         { type: 'globe-coordinate', latitude: 1.5, longitude: -2.5 },
       ]);
+    });
+
+    it('retains an unfamiliar globe ID without assuming Earth', () => {
+      const moon = statement(
+        snak(
+          'P625',
+          'globe-coordinate',
+          val({
+            latitude: 10,
+            longitude: -3,
+            globe: 'https://www.wikidata.org/entity/Q405',
+          }),
+        ),
+      );
+      expect(normalizeStatements('P625', [moon])[0]?.value).toEqual({
+        type: 'globe-coordinate',
+        latitude: 10,
+        longitude: -3,
+        globe: 'Q405',
+      });
     });
 
     it('omits references and qualifiers when the statement carries none', () => {

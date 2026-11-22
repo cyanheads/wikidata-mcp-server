@@ -850,6 +850,28 @@ describe('wikidataResolveExternalId', () => {
       expect(result.structuredContent).not.toHaveProperty('unavailableGraphs');
     });
 
+    it('uses a normalized arXiv ID in both graphs and echoes it on both surfaces', async () => {
+      mockQuery.mockImplementation(
+        (query: string, _language, _timeoutMs, _ctx, options?: SparqlQueryOptions) =>
+          Promise.resolve(
+            options?.graph === 'scholarly' && query.includes('("2002.11618" 0)')
+              ? results(claim('Q101469239', 'Scientific article'))
+              : results(),
+          ),
+      );
+
+      const result = await call({ property: 'P818', value: 'https://arxiv.org/abs/2002.11618' });
+
+      expect(mockQuery).toHaveBeenCalledTimes(2);
+      expect(mockQuery.mock.calls[0]?.[0]).toBe(mockQuery.mock.calls[1]?.[0]);
+      expect(result.structuredContent).toMatchObject({
+        match: { id: 'Q101469239', label: 'Scientific article', rank: 'normal' },
+        value: '2002.11618',
+      });
+      expect(text(result)).toContain('**Value searched:** 2002.11618');
+      expect(text(result)).toContain('**QID:** Q101469239');
+    });
+
     it('lists claimants from both graphs as multipleMatches', async () => {
       byGraph({ main: answer(claim('Q1', 'Main')), scholarly: answer(claim('Q2', 'Scholarly')) });
 
@@ -1313,6 +1335,33 @@ describe('wikidataResolveExternalId', () => {
  */
 describe('normalizeExternalId', () => {
   it.each([
+    ['P932', 'PMC7652289x'],
+    ['P6782', 'https://example.org/042nb2s44'],
+    ['P6782', 'https://ror.org/042nb2s44/extra'],
+    ['P213', '0000 0001 2124 432'],
+    ['P818', 'arXiv:2002x11618'],
+    ['P818', 'https://arxiv.org/abs/2002.11618/extra'],
+    ['P214', 'https://ror.org/042nb2s44'],
+  ])('keeps unsupported %s input literal: %s', (property, value) => {
+    expect(normalizeExternalId(property, `  ${value}  `)).toEqual([value]);
+  });
+
+  it.each([
+    ['P932', 'PMC7652289', '7652289'],
+    ['P6782', 'https://ror.org/042nb2s44', '042nb2s44'],
+    ['P6782', 'HTTPS://ROR.ORG/042nb2s44', '042nb2s44'],
+    ['P213', '0000 0001 2124 4328', '0000000121244328'],
+    ['P213', '0000 0001 2124 432X', '000000012124432X'],
+    ['P818', 'arXiv:2002.11618', '2002.11618'],
+    ['P818', 'https://arxiv.org/abs/2002.11618', '2002.11618'],
+    ['P818', 'arXiv:hep-th/9901001v2', 'hep-th/9901001v2'],
+    ['P818', 'https://arxiv.org/abs/math.GT/0309136v1', 'math.GT/0309136v1'],
+  ])('normalizes %s display form %s', (property, value, expected) => {
+    expect(normalizeExternalId(property, value)).toEqual([expected]);
+    expect(normalizeExternalId(property, expected)).toEqual([expected]);
+  });
+
+  it.each([
     // OpenAlex: page and API URLs, any case, then the entity letter tried in both cases.
     ['P10283', 'https://openalex.org/A5035517966', ['A5035517966', 'a5035517966']],
     ['P10283', 'openalex.org/A5035517966', ['A5035517966', 'a5035517966']],
@@ -1502,6 +1551,11 @@ describe('normalizeExternalId timing', () => {
       80_000,
     ],
     ['P345', 'one long line', longLine, 80_000],
+    ['P932', 'a numeric display form', (n: number) => `PMC${digits(n)}`, 320_000],
+    ['P818', 'a versioned ID', (n: number) => `arXiv:2002.11618v${digits(n)}`, 320_000],
+    ['P818', 'an unrecognized archive', (n: number) => `arXiv:${'a'.repeat(n)}`, 80_000],
+    ['P818', 'an invalid label and one long line', (n: number) => `arXiv:${longLine(n)}`, 80_000],
+    ['P818', 'an invalid label and lines', (n: number) => `arXiv:${breaks(n)}x`, 80_000],
   ] as const)(
     '%s, %s, normalizes in linear time',
     (property, _shape, build, largest) => {

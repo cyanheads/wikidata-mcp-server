@@ -68,6 +68,7 @@ The published [wikidata-guide](./skills/wikidata-guide/SKILL.md) covers entity d
 
 - Q-IDs (e.g. `Q76`) fetch items and P-IDs (e.g. `P31`) fetch properties; `fields` selects `labels`, `descriptions`, `aliases`, `statements`, or `sitelinks`, and narrows the upstream fetch
 - `id` may be bare, an entity URI (`http://www.wikidata.org/entity/Q76`), or `wd:Q76`, as on `wikidata_get_labels`, `wikidata_get_statements`, and `wikidata_get_sitelinks`
+- A merged ID returns the canonical `id` and the requested `redirectedFrom` on the entity, statement, and sitelink tools.
 - `languages` filters multilingual maps to the given language codes
 - An entity too large to inline returns an outline of field categories with byte sizes; its `retrieval_notice` names a `fields` set that fits and points oversized statements or sitelinks to the tool that can narrow them
 
@@ -78,7 +79,7 @@ The published [wikidata-guide](./skills/wikidata-guide/SKILL.md) covers entity d
 - Up to 500 distinct IDs per call via the MediaWiki `wbgetentities` API (batched 50 at a time), with up to 50 language codes per request; `ids` takes up to 10,000 entries, and distinct IDs past the first 500 come back in `deferredIds` to send in a follow-up call
 - IDs may be bare (`Q76`), entity URIs (`http://www.wikidata.org/entity/Q76`), or `wd:Q76`, the forms SPARQL results carry
 - Reports a `found` count and `notFound` IDs for partial results; malformed entries come back in `invalid` and fail the call (`invalid_ids`) only when no valid ID remains
-- Meant to follow a SPARQL query: run it, then humanize the QIDs
+- `unrecognizedLanguages` names requested codes that Wikidata rejected. Recognized languages still return their labels and descriptions.
 
 ---
 
@@ -87,7 +88,8 @@ The published [wikidata-guide](./skills/wikidata-guide/SKILL.md) covers entity d
 - `properties` limits the fetch to specific P-IDs (omit for all); item QIDs and quantity units in values, qualifiers, and references are resolved to labels unless `resolve_labels=false`, and every P-ID the statements name is labelled in `propertyLabels`
 - `rank="best"` keeps each property's preferred statements, or its normal ones when none is preferred, and never deprecated ones: the statements SPARQL's truthy `wdt:` reads (default `"all"`)
 - Each property returns up to `limit` statements (default 10, at most 500) from `offset`, in upstream order; `propertyTotals` counts every statement a property holds, and `nextOffset`, present while any property holds more, continues every property at once
-- References stay grouped by source; unknown or absent values come back as `somevalue` / `novalue`
+- Requested properties with no statements have a zero in `propertyTotals` and are named in the notice. A claim with an unknown value (`somevalue`) or an explicitly absent value (`novalue`) still counts.
+- Dates carry their calendar model and coordinates their globe when Wikidata supplies them. References stay grouped by source.
 - A page of several properties too large to inline returns an outline of P-IDs with byte sizes, largest first (as of 2026-11-15, unfiltered Q30 carries 475 properties across 1,766 statements); re-call with the same `limit`, `offset`, and `rank` plus `properties` whose sizes sum to 24,000 or less, as the `retrieval_notice` suggests. A single property is never outlined: it returns its window
 
 ---
@@ -95,7 +97,7 @@ The published [wikidata-guide](./skills/wikidata-guide/SKILL.md) covers entity d
 ### `wikidata_get_sitelinks` <sub>tool</sub>
 
 - Maps site codes (e.g. `enwiki`) to article titles and URLs; `sites` filters to specific codes
-- `wikis_only=true` keeps only Wikipedia editions, those whose URL is on a `<subdomain>.wikipedia.org` host (drops Commons, Wikispecies, Wikidata, Wiktionary, Wikiquote, Wikisource, and every other project)
+- `wikis_only=true` keeps Wikipedia language editions, including Simple English. It excludes Abstract Wikipedia and sister projects such as Commons and Wikispecies. `notFound` lists requested site codes the item lacks before the edition filter runs.
 - Q-IDs only; P-IDs are not supported
 
 ---
@@ -112,7 +114,7 @@ The published [wikidata-guide](./skills/wikidata-guide/SKILL.md) covers entity d
 
 ### `wikidata_resolve_external_id` <sub>tool</sub>
 
-- Resolves DOI (P356), PMID (P698), ORCID (P496), OpenAlex ID (P10283), IMDb ID (P345), and other external IDs to a QID; whitespace and resolver URL prefixes are stripped, and DOIs, PMIDs, ORCIDs, OpenAlex IDs, and IMDb IDs are normalized to their stored form
+- Resolves external IDs to Q-IDs, including DOI, PMID, ORCID, OpenAlex and IMDb IDs. Recognized input forms also include `PMC`-prefixed PMCIDs (P932), ROR URLs (P6782), spaced ISNIs (P213), and arXiv labels or abstract URLs (P818).
 - The property must have data type `external-id`; item-valued or media properties (e.g. `P31`, `P18`) are rejected
 - Searches the main graph and the scholarly-article graph (where scholarly articles and their DOIs and PMIDs live) in parallel; a graph that does not answer is named in `unavailableGraphs`, and the result covers the other
 - Matches through statements of every rank, entities holding the ID at best rank first, then another non-deprecated rank, then deprecated; `match.rank` reports the statement's rank (`deprecated` usually means a retired or mistaken ID)
