@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-11-21
+
+Preserve Wikidata statement context and resolve merged IDs.
+
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-11-15 · ⚠️ Breaking · 🛡️ Security
 
 Bound wikidata_sparql_query results at 4,000 rows, find scholarly articles by DOI and PMID, and page statements per property with a best-rank filter and labelled P-IDs.
